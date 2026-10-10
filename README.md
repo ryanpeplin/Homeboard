@@ -193,7 +193,8 @@ chmod +x ~/homeboard/kiosk.sh && mkdir -p ~/.config/labwc && echo '/home/pi/home
 What `kiosk.sh` does:
 - **Starts at the right time:** it waits for the server, plus 20 seconds for the rest of the boot to settle.
 - **Restarts Chromium if it hangs.** The board checks in with the server every 30 seconds, and `kiosk.sh` asks the server how long ago that was. If the board hasn't loaded within 3 minutes of Chromium starting, or stops checking in for 3 minutes, Chromium is restarted. This is a safety net in case Chromium hangs or crashes on 512MB.
-- **Logs to `~/chromium-boot.log`,** including a line each time it restarts Chromium.
+- **Restarts Chromium once at wake-up if it was started during sleep hours,** for example after a reboot or power cut at night. Chromium can't go fullscreen on a screen that's off, so without this it would wake up as a normal window with tabs and an address bar.
+- **Logs to `~/chromium-boot.log`,** including a line each time it restarts Chromium and why.
 
 The Chromium settings it uses:
 - `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and `--ozone-platform=wayland` tell Chromium which screen to draw on.
@@ -298,6 +299,7 @@ To save changes to GitHub, commit and push from the homeboard folder on your PC 
 | Board is black on the Pi | Probably the sleep schedule. Check whether it's outside your `awake` hours. |
 | Screen doesn't switch on or off on schedule | Run `journalctl -u homeboard -b --no-pager \| grep sleep \| tail -20`. Repeated `exited 1` lines show the error from the on/off command. |
 | Screen black with a mouse pointer during awake hours | Chromium hasn't loaded the board. Wait about 4 minutes, because `kiosk.sh` restarts Chromium by then. If it stays black, check `tail -40 ~/chromium-boot.log` and `curl -s localhost:8080/api/kiosk`, and make sure `~/.config/labwc/autostart` contains `/home/pi/homeboard/kiosk.sh &`. |
+| Board shows as a normal window, with tabs and an address bar | Chromium was started while the screen was off. `kiosk.sh` restarts it within a minute of the screen waking. If it doesn't, check `grep '===' ~/chromium-boot.log \| tail` and make sure the Pi has the latest `kiosk.sh` and `server.py`. A reboot during awake hours also fixes it. |
 | Board very slow | Usually memory. Keep the background at the screen's resolution, and keep the Chromium settings from step 4.6. |
 | Server problems | Status: `systemctl status homeboard --no-pager`. Log: `journalctl -u homeboard -n 50 --no-pager`. |
 | Spotify panel says "Spotify not working" | The message under it gives the reason. Usually the login needs redoing on the PC; then copy `tokens.json` to the Pi. |

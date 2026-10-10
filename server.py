@@ -335,9 +335,10 @@ class Handler(BaseHTTPRequestHandler):
                     _kiosk_seen = time.time()
                 return self.send(200, {"asleep": is_asleep()})
             if path == "/api/kiosk":
-                # kiosk.sh restarts Chromium when the page stops checking in.
+                # kiosk.sh restarts Chromium when the page stops checking in, and once
+                # on wake if it was started while the display was off.
                 age = None if _kiosk_seen is None else int(time.time() - _kiosk_seen)
-                return self.send(200, {"seconds_since_seen": age})
+                return self.send(200, {"seconds_since_seen": age, "asleep": is_asleep()})
             if path == "/api/config":
                 return self.send(200, CONFIG.get("display", {}))
             if path == "/api/calendar":
