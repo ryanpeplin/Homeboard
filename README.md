@@ -169,13 +169,17 @@ which chromium chromium-browser
 ```
 The steps below assume `labwc` and `/usr/bin/chromium`. On older images the browser is `chromium-browser`, so substitute that name. For X11 (`Xorg`), see [Older X11 desktops](#older-x11-desktops).
 
-Add the Chromium startup line:
+Chromium is started by [`kiosk.sh`](kiosk.sh). Make it executable and set the desktop to run it at login:
 ```bash
-mkdir -p ~/.config/labwc && echo "sh -c 'until curl -s http://localhost:8080 >/dev/null; do sleep 2; done; sleep 20; WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 chromium --ozone-platform=wayland --no-memcheck --password-store=basic --kiosk --incognito --renderer-process-limit=1 --no-first-run --disable-extensions --disable-sync --disable-component-update --disable-background-networking --disable-features=Translate,MediaRouter,OptimizationHints --noerrdialogs --disable-infobars --check-for-update-interval=31536000 http://localhost:8080' &" >> ~/.config/labwc/autostart
+chmod +x ~/homeboard/kiosk.sh && mkdir -p ~/.config/labwc && echo '/home/pi/homeboard/kiosk.sh &' > ~/.config/labwc/autostart
 ```
-What the line does:
-- It waits until the server answers, then another 20 seconds for the rest of the Pi to finish starting. Starting Chromium while the Pi is still busy booting left the screen black.
-- `WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=…` and `--ozone-platform=wayland` tell Chromium which screen to use. The desktop doesn't pass these to startup programs on this Pi. Without them, Chromium runs without a window and never loads the board, so you get a black screen with a mouse pointer.
+What `kiosk.sh` does:
+- **Starts at the right time:** it waits for the server, plus 20 seconds for the rest of the boot to settle.
+- **Restarts Chromium if it hangs.** The board checks in with the server every 30 seconds, and `kiosk.sh` asks the server how long ago that was. If the board hasn't loaded within 3 minutes of Chromium starting, or stops checking in for 3 minutes, Chromium is restarted. On 512MB, Chromium sometimes hangs while starting during boot (its log shows `Network service crashed`) and never loads the page.
+- **Logs to `~/chromium-boot.log`,** including a line each time it restarts Chromium.
+
+The Chromium settings it uses:
+- `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and `--ozone-platform=wayland` tell Chromium which screen to draw on.
 - `--renderer-process-limit=1` and the `--disable-…` settings turn off Chromium features the board doesn't use, to save memory on 512MB.
 - `--no-memcheck` skips the *"It is not recommended to run Chromium on devices with less than 1GB of RAM"* pop-up.
 - `--password-store=basic` skips the *"Choose password for new keyring"* pop-up.
@@ -269,7 +273,7 @@ Don't overwrite the Pi's `tokens.json` with an old copy from your PC. The Pi kee
 |---|---|
 | Board is black on the Pi | Probably the sleep schedule. Check whether it's outside your `awake` hours. |
 | Screen doesn't switch on or off on schedule | Run `journalctl -u homeboard -b --no-pager \| grep sleep \| tail -20`. Repeated `exited 1` lines show the error from the on/off command. |
-| Screen black with a mouse pointer during awake hours | Chromium has no window. Run `journalctl -u homeboard -b --no-pager \| grep 'GET /app.js'`: no lines means Chromium never loaded the page. Check the startup line still has the `WAYLAND_DISPLAY=…` settings from step 4.6 (`cat ~/.config/labwc/autostart`). |
+| Screen black with a mouse pointer during awake hours | Chromium hasn't loaded the board. Wait about 4 minutes, because `kiosk.sh` restarts Chromium by then. If it stays black, check `tail -40 ~/chromium-boot.log` and `curl -s localhost:8080/api/kiosk`, and make sure `~/.config/labwc/autostart` contains `/home/pi/homeboard/kiosk.sh &`. |
 | Board very slow | Usually memory. Keep the background at the screen's resolution, and keep the Chromium settings from step 4.6. |
 | Server problems | Status: `systemctl status homeboard --no-pager`. Log: `journalctl -u homeboard -n 50 --no-pager`. |
 | Spotify panel says "Spotify not working" | The message under it gives the reason. Usually the login needs redoing on the PC; then copy `tokens.json` to the Pi. |

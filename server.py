@@ -246,6 +246,7 @@ SPOTIFY_ACTIONS = {
 
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _asleep = False
+_kiosk_seen = None  # last time the wall display's page polled /api/sleep
 
 
 def is_asleep(now=None):
@@ -324,11 +325,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        global _kiosk_seen
         path, _, query = self.path.partition("?")
         params = dict(urllib.parse.parse_qsl(query))
         try:
             if path == "/api/sleep":
+                if self.client_address[0] == "127.0.0.1":  # only the wall display's own page polls this locally
+                    _kiosk_seen = time.time()
                 return self.send(200, {"asleep": is_asleep()})
+            if path == "/api/kiosk":
+                # kiosk.sh restarts Chromium when the page stops checking in.
+                age = None if _kiosk_seen is None else int(time.time() - _kiosk_seen)
+                return self.send(200, {"seconds_since_seen": age})
             if path == "/api/config":
                 return self.send(200, CONFIG.get("display", {}))
             if path == "/api/calendar":
