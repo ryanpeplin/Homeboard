@@ -175,12 +175,13 @@ chmod +x ~/homeboard/kiosk.sh && mkdir -p ~/.config/labwc && echo '/home/pi/home
 ```
 What `kiosk.sh` does:
 - **Starts at the right time:** it waits for the server, plus 20 seconds for the rest of the boot to settle.
-- **Restarts Chromium if it hangs.** The board checks in with the server every 30 seconds, and `kiosk.sh` asks the server how long ago that was. If the board hasn't loaded within 3 minutes of Chromium starting, or stops checking in for 3 minutes, Chromium is restarted. On 512MB, Chromium sometimes hangs while starting during boot (its log shows `Network service crashed`) and never loads the page.
+- **Restarts Chromium if it hangs.** The board checks in with the server every 30 seconds, and `kiosk.sh` asks the server how long ago that was. If the board hasn't loaded within 3 minutes of Chromium starting, or stops checking in for 3 minutes, Chromium is restarted. This is a safety net in case Chromium hangs or crashes on 512MB.
 - **Logs to `~/chromium-boot.log`,** including a line each time it restarts Chromium.
 
 The Chromium settings it uses:
 - `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and `--ozone-platform=wayland` tell Chromium which screen to draw on.
-- `--renderer-process-limit=1` and the `--disable-…` settings turn off Chromium features the board doesn't use, to save memory on 512MB.
+- The `--disable-…` settings turn off Chromium features the board doesn't use, to save memory on 512MB.
+- Don't add `--renderer-process-limit=1`. It looks like a memory saver, but with it Chromium never loads the board.
 - `--no-memcheck` skips the *"It is not recommended to run Chromium on devices with less than 1GB of RAM"* pop-up.
 - `--password-store=basic` skips the *"Choose password for new keyring"* pop-up.
 - `--incognito` stops the "restore pages?" prompt after a power cut.

@@ -18,7 +18,7 @@ sleep 20  # let the rest of the boot settle
 while true; do
   echo "=== $(date) starting chromium" >> "$LOG"
   chromium --ozone-platform=wayland --no-memcheck --password-store=basic \
-    --kiosk --incognito --renderer-process-limit=1 --no-first-run \
+    --kiosk --incognito --no-first-run \
     --disable-extensions --disable-sync --disable-component-update \
     --disable-background-networking --disable-features=Translate,MediaRouter,OptimizationHints \
     --noerrdialogs --disable-infobars --check-for-update-interval=31536000 \
