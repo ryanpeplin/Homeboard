@@ -4,11 +4,28 @@ A self-hosted DAKboard-style wall display: a 4-week calendar with daily forecast
 
 - `server.py` is a small Python server. It fetches your calendars, weather, Fitbit and Spotify and serves the page.
 - `static/` holds the page shown in the browser.
-- `config.json` holds all your settings. `tokens.json` is created automatically when you connect Fitbit and Spotify.
+- `kiosk.sh` starts Chromium fullscreen on the Pi and restarts it if the board stops responding.
+- `config.example.json` is the settings template. Your real settings go in `config.json`, and your Fitbit and Spotify logins in `tokens.json`, which is created automatically when you connect them.
 
-> `config.json` and `tokens.json` contain your app passwords and private calendar links. Don't share them or post them anywhere public.
+> `config.json` and `tokens.json` contain your app passwords and private calendar links. They're listed in `.gitignore`, so they never go to GitHub. That also means a fresh copy of the repo doesn't have them, so keep a backup of both somewhere private.
 
-## 1. Configure `config.json`
+## 1. Get the code and create `config.json`
+
+Download the repo to your PC (it's private, so Git asks you to sign in to GitHub):
+
+```bash
+git clone https://github.com/ryanpeplin/Homeboard.git C:\Users\ryanp\Claude\homeboard
+```
+
+Then create your settings file from the template:
+
+```bash
+copy C:\Users\ryanp\Claude\homeboard\config.example.json C:\Users\ryanp\Claude\homeboard\config.json
+```
+
+If you have a backup of `config.json` and `tokens.json`, copy those into the folder instead, and you can skip step 3.
+
+Then edit `config.json`:
 
 | Section | What to set |
 |---|---|
@@ -25,7 +42,7 @@ A self-hosted DAKboard-style wall display: a 4-week calendar with daily forecast
 
 ## 2. Run it on your PC first
 
-In PowerShell, from the homeboard folder (`C:\Users\ryanp\Claude\homeboard`):
+In PowerShell, from the homeboard folder (`cd C:\Users\ryanp\Claude\homeboard`):
 
 ```bash
 python -m pip install -r requirements.txt
@@ -167,7 +184,7 @@ ps -e | grep -E 'labwc|wayfire|Xorg'
 ```bash
 which chromium chromium-browser
 ```
-The steps below assume `labwc` and `/usr/bin/chromium`. On older images the browser is `chromium-browser`, so substitute that name. For X11 (`Xorg`), see [Older X11 desktops](#older-x11-desktops).
+The steps below assume `labwc` and `/usr/bin/chromium`. On older images the browser is `chromium-browser`; if so, change `chromium` to `chromium-browser` everywhere in `kiosk.sh`, including the `pkill` lines. For X11 (`Xorg`), see [Older X11 desktops](#older-x11-desktops).
 
 Chromium is started by [`kiosk.sh`](kiosk.sh). Make it executable and set the desktop to run it at login:
 ```bash
@@ -199,7 +216,7 @@ Reboot:
 ```bash
 sudo reboot
 ```
-The Pi should start straight into the board, fullscreen, with no mouse pointer. The page hides the pointer on the Pi's own screen.
+Within about 2 minutes the board should be on screen, fullscreen, with no mouse pointer. The page hides the pointer on the Pi's own screen. To check that it's running, use `curl -s localhost:8080/api/kiosk` over SSH: a number under about 30 means the board is checking in.
 
 ### 4.7 Set up the screen on/off commands
 Install `wlopm`, which puts the monitor into standby and wakes it:
@@ -257,16 +274,22 @@ Edit files on your PC, then copy the changed file to the Pi from a PowerShell wi
 ```bash
 scp C:\Users\ryanp\Claude\homeboard\config.json pi@homeboard.local:~/homeboard/config.json
 ```
-Use the same pattern for `server.py`, or for files in `static/` (copy those to `~/homeboard/static/`).
+Use the same pattern for `server.py` and `kiosk.sh`, or for files in `static/` (copy those to `~/homeboard/static/`).
 
 What to do after copying:
 - **`config.json` or `server.py`:** restart the server, over SSH:
   ```bash
   sudo systemctl restart homeboard
   ```
+- **`kiosk.sh`:** make sure it's still executable, then reboot:
+  ```bash
+  chmod +x ~/homeboard/kiosk.sh && sudo reboot
+  ```
 - **Files in `static/`:** nothing. The page picks them up the next time it loads, at the next reboot or the next wake-up.
 
 Don't overwrite the Pi's `tokens.json` with an old copy from your PC. The Pi keeps its logins up to date in its own copy.
+
+To save changes to GitHub, commit and push from the homeboard folder on your PC (`git add -A`, `git commit -m "…"`, `git push`). `config.json` and `tokens.json` are left out automatically.
 
 ## Troubleshooting
 

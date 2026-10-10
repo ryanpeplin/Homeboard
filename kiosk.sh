@@ -1,7 +1,9 @@
 #!/bin/sh
 # Starts Chromium fullscreen on the Pi's screen and restarts it if the board
-# stops checking in with the server (Chromium can hang while starting during boot
-# on a 512MB Pi, leaving a black screen). Launched from ~/.config/labwc/autostart.
+# stops checking in with the server (a safety net for hangs and crashes on a
+# 512MB Pi). Launched from ~/.config/labwc/autostart.
+#
+# Don't add --renderer-process-limit=1: with it Chromium never loads the board.
 
 URL=http://localhost:8080
 LOG=/home/pi/chromium-boot.log

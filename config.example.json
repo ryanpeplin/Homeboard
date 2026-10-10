@@ -2,7 +2,7 @@
   "port": 8080,
 
   "display": {
-    "background": "backgrounds/background.jpg",
+    "background": "backgrounds/background-1366.jpg",
     "clock_24h": true,
     "background_dim": 0.15
   },
@@ -38,11 +38,11 @@
   "sleep": {
     "enabled": false,
     "awake": {
-      "default": ["06:00", "23:00"],
+      "default": ["07:00", "22:00"],
       "sat": ["08:00", "23:30"],
       "sun": ["08:00", "23:00"]
     },
-    "off_command": "",
-    "on_command": ""
+    "off_command": "WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 wlopm --off HDMI-A-1",
+    "on_command": "WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 wlopm --on HDMI-A-1"
   }
 }

@@ -8,5 +8,5 @@ __pycache__/
 *.pyc
 .venv/
 
-# Pi diagnostics
-chromium.log
+# Logs
+*.log

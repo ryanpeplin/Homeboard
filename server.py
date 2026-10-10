@@ -90,7 +90,7 @@ def save_token(svc, tok):
 def to_local(v):
     """Return (datetime, all_day) for an icalendar date/datetime."""
     if isinstance(v, datetime):
-        return (v.astimezone() if v.tzinfo else v.astimezone()), False
+        return v.astimezone(), False  # naive (floating) times are taken as local
     return datetime(v.year, v.month, v.day).astimezone(), True
 
 
@@ -224,14 +224,16 @@ def fetch_spotify():
         return {"playing": False, "item": None}
     if status != 200:
         return {"error": data}
-    item = data.get("item") or {}
+    item = data.get("item")  # None during ads and for some local files
+    if not item:
+        return {"playing": data.get("is_playing", False), "item": None}
     images = (item.get("album") or {}).get("images") or [{}]
     return {
         "playing": data.get("is_playing", False),
-        "item": item and {
+        "item": {
             "title": item.get("name"),
-            "artist": ", ".join(a["name"] for a in item.get("artists", [])) or item.get("show", {}).get("name"),
-            "art": images[-1].get("url") if len(images) < 2 else images[1].get("url"),
+            "artist": ", ".join(a["name"] for a in item.get("artists", [])) or (item.get("show") or {}).get("name"),
+            "art": images[-1].get("url") if len(images) < 2 else images[1].get("url"),  # ~300px when available
         },
     }
 
@@ -285,9 +287,8 @@ def sleep_loop():
     A failed command is retried on the next check. At boot the server starts before
     the desktop session exists, so the first attempts are expected to fail.
 
-    While asleep the off command is re-sent on every check: other software (e.g. the
-    Pi's kanshi starting after us) can switch the display back on behind our back.
-    The on command only runs on the transition, to avoid re-setting the mode all day.
+    While asleep the off command is re-sent on every check, in case something else
+    wakes the display. The on command only runs on the transition.
     """
     global _asleep
     applied = None  # the state the display was last successfully put into

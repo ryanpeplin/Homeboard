@@ -1,4 +1,4 @@
-// Homeboard front end. Kept deliberately light for a Raspberry Pi Zero W:
+// Homeboard front end. Kept deliberately light for a 512MB Raspberry Pi Zero 2 W:
 // DOM is rebuilt only when fetched data actually changes.
 
 const DOW = ["S", "M", "T", "W", "T", "F", "S"];
