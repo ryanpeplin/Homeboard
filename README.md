@@ -317,6 +317,21 @@ Untested. If `ps -e | grep -E 'labwc|wayfire|Xorg'` shows `Xorg` instead of `lab
   "on_command": "DISPLAY=:0 xset dpms force on && DISPLAY=:0 xset s off -dpms"
   ```
 
+## Future updates
+
+### Match Google Calendar event colors
+**Goal:** show each event in the color picked for it in Google Calendar (red for work, yellow for personal, and so on), instead of one color per feed.
+
+**Why it needs the API:** Google's secret iCal links (*Secret address in iCal format*) leave out per-event colors. A check on 2026-10-09 found no color information in any of the feeds (2,431 events in the main calendar).
+
+**Plan:**
+- **Google Cloud:** in the same project used for Fitbit, enable the **Google Calendar API** and add the read-only scope `https://www.googleapis.com/auth/calendar.readonly`.
+- **Server, sign-in:** request that scope alongside the Fitbit one, so a single Google sign-in at `/auth/fitbit` covers both. Requesting the new scope means signing in again once.
+- **Server, fetching:** for Google calendars, use the Calendar API instead of the iCal URL. That's `events.list` with `singleEvents=true` (which expands recurring events) and `timeMin`/`timeMax` set to the board's date range.
+- **Colors:** each event's `colorId` maps to a hex color via the `colors.get` endpoint. Events without a `colorId` use the calendar's own color from `calendarList`.
+- **Other calendars:** non-Google calendars keep using iCal URLs. In `config.json`, a feed could be marked e.g. `"google_calendar_id": "primary"` in place of `url`.
+- **Page:** no changes needed. It already colors each event from the server's `color` field.
+
 ## Notes
 - **Pi Zero 2 W (512MB RAM):** use a JPEG background at your screen's resolution (1366×768 for the HannStar HF199H), not a large photo. The original 4.8MB, 2560×1440 background made the board very slow; the current `background-1366.jpg` is 254KB. The page only redraws when data changes. If Chromium is ever sluggish, raise the Spotify polling interval (10 s) on the last lines of `static/app.js`.
 - **Update times:** the clock updates every second, Spotify every 10 seconds, the calendar every 10 minutes, steps about every 5 minutes, and weather every 15 minutes.
