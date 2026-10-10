@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homeboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/weather-icons/2.0.12/css/weather-icons.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="bg"></div>
+<main id="board">
+  <section id="calendar">
+    <div id="dow"></div>
+    <div id="grid"></div>
+  </section>
+
+  <aside id="side">
+    <div id="clock">--:--</div>
+    <div id="date"></div>
+
+    <div id="steps" class="card">
+      <svg viewBox="0 0 120 120">
+        <circle class="track" cx="60" cy="60" r="52"/>
+        <circle class="arc" id="steps-arc" cx="60" cy="60" r="52"/>
+      </svg>
+      <div class="steps-inner">
+        <i class="fa-solid fa-shoe-prints"></i>
+        <span id="steps-count">–</span>
+      </div>
+    </div>
+
+    <div id="now" class="card">
+      <div class="now-row"><span id="now-temp">--°</span><i id="now-icon" class="wi"></i></div>
+      <div id="feels"></div>
+    </div>
+
+    <div id="astro" class="card">
+      <div><div class="label"><i class="wi wi-sunrise"></i> Sunrise</div><div id="sunrise">--</div></div>
+      <div><div class="label"><i class="fa-solid fa-moon"></i> Moon</div><div id="moon">--</div></div>
+    </div>
+
+    <div id="spotify" class="card hidden">
+      <div id="sp-track">
+        <img id="sp-art" alt="">
+        <div><div id="sp-title"></div><div id="sp-artist"></div></div>
+      </div>
+      <div id="sp-controls">
+        <button data-act="previous" aria-label="Previous"><i class="fa-solid fa-backward-step"></i></button>
+        <button id="sp-toggle" aria-label="Play/Pause"><i class="fa-solid fa-play"></i></button>
+        <button data-act="next" aria-label="Next"><i class="fa-solid fa-forward-step"></i></button>
+        <i class="fa-solid fa-headphones"></i>
+      </div>
+    </div>
+  </aside>
+</main>
+<div id="sleep" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

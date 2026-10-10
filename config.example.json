@@ -1,0 +1,48 @@
+{
+  "port": 8080,
+
+  "display": {
+    "background": "backgrounds/background.jpg",
+    "clock_24h": true,
+    "background_dim": 0.15
+  },
+
+  "calendar": {
+    "weeks": 4,
+    "week_start": "sunday",
+    "refresh_minutes": 10,
+    "feeds": [
+      { "name": "Me",       "color": "#d50000", "url": "https://calendar.google.com/calendar/ical/YOUR_ID/private-XXXX/basic.ics" },
+      { "name": "Family",   "color": "#33b679", "url": "webcal://p01-caldav.icloud.com/published/2/XXXX" },
+      { "name": "Holidays", "color": "#009688", "url": "https://calendar.google.com/calendar/ical/en.usa%23holiday%40group.v.calendar.google.com/public/basic.ics" }
+    ]
+  },
+
+  "weather": {
+    "lat": 40.7128,
+    "lon": -74.0060,
+    "units": "fahrenheit"
+  },
+
+  "fitbit": {
+    "client_id": "",
+    "client_secret": "",
+    "goal": 0
+  },
+
+  "spotify": {
+    "client_id": "",
+    "client_secret": ""
+  },
+
+  "sleep": {
+    "enabled": false,
+    "awake": {
+      "default": ["06:00", "23:00"],
+      "sat": ["08:00", "23:30"],
+      "sun": ["08:00", "23:00"]
+    },
+    "off_command": "",
+    "on_command": ""
+  }
+}

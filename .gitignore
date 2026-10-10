@@ -1,0 +1,12 @@
+# Secrets: app credentials, private calendar URLs and OAuth tokens.
+# config.example.json is the committed template.
+config.json
+tokens.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Pi diagnostics
+chromium.log
