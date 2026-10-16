@@ -48,7 +48,7 @@ function tick() {
     shownDay = day;
     $("date").textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
     $("moon").textContent = moonPhase(now);
-    if (!first) { loadCalendar(true); loadWeather(true); }
+    if (!first) { loadCalendar(true); loadWeather(true); delete last.packages; loadPackages(); }  // "tomorrow" is now "today"
   }
 }
 
@@ -213,6 +213,20 @@ $("sp-toggle").onclick = () => spotify(playing ? "pause" : "play");
 
 const PK_ICON = { "Out for delivery": "fa-truck-fast", "Delayed": "fa-triangle-exclamation", "Delivered": "fa-circle-check" };
 const PK_MAX = 4;  // rows that fit in the sidebar
+
+function pkStatus(p) {
+  if (p.status === "Delivered")
+    return `Delivered ${new Date(p.status_at * 1000).toLocaleDateString(undefined, { weekday: "short" })}`;
+  if (p.status !== "Shipped" || !p.eta) return p.status;
+  const [y, m, d] = p.eta.split("-").map(Number);
+  const eta = new Date(y, m - 1, d), now = new Date();
+  const days = Math.round((eta - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / DAY);
+  if (days < 0) return p.status;  // the date has passed without a newer email
+  if (days === 0) return "Arrives today";
+  if (days === 1) return "Arrives tomorrow";
+  return "Arrives " + (days < 7 ? eta.toLocaleDateString(undefined, { weekday: "short" })
+    : `${MONTHS[eta.getMonth()]} ${eta.getDate()}`);
+}
 async function loadPackages() {
   try {
     const { data, changed } = await getJSON("packages", "/api/packages");
@@ -224,10 +238,8 @@ async function loadPackages() {
       // Links only off the wall display, where a tap would navigate the kiosk away from the board.
       const row = el(IS_KIOSK ? "div" : "a", "pk" + (p.status === "Out for delivery" ? " out" : ""));
       if (!IS_KIOSK) { row.href = p.link; row.target = "_blank"; row.rel = "noopener"; }
-      const day = p.status === "Delivered"
-        ? " " + new Date(p.status_at * 1000).toLocaleDateString(undefined, { weekday: "short" }) : "";
       row.append(el("i", `fa-solid ${PK_ICON[p.status] || "fa-box"}`), el("span", "pk-label", p.label),
-        el("span", "pk-status", p.status + day));
+        el("span", "pk-status", pkStatus(p)));
       return row;
     });
     if (list.length > PK_MAX) rows.push(el("div", "pk-more", `+${list.length - PK_MAX} more`));

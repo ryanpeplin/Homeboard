@@ -280,6 +280,19 @@ STATUSES = [
     ("Shipped", re.compile(r"shipped|on (?:its|the) way|in transit|shipment|tracking", re.I)),
 ]
 STATUS_ORDER = {"Out for delivery": 0, "Delayed": 1, "Shipped": 2, "Delivered": 3}
+# Expected delivery dates are only read right after one of these labels, so order and
+# ship dates elsewhere in the email are ignored.
+ETA_LABEL = re.compile(
+    r"\b(?:(?:expected|estimated|scheduled|new)\s+(?:delivery|arrival)(?:\s+date)?(?:\s+(?:on|by|is))?"
+    r"|arriving|arrives|will\s+arrive|expected\s+by|delivery\s+(?:date|by)|get\s+it|delivers)\b", re.I)
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+WEEKDAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+ETA_DATE = re.compile(
+    r"\b(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?"
+    r"(?:\s*[-–]\s*(?P<day2>\d{1,2})\b)?(?:,?\s+(?P<year>\d{4}))?"
+    r"|\b(?P<nm>\d{1,2})/(?P<nd>\d{1,2})(?:/(?P<ny>\d{2}(?:\d{2})?))?\b"
+    r"|\b(?P<rel>today|tomorrow)\b"
+    r"|\b(?P<wd>mon|tue|wed|thu|fri|sat|sun)(?:day|s|sday|nesday|rs|rsday|urday)?\b\.?", re.I)
 _packages = {}
 _packages_error = None
 
@@ -369,6 +382,44 @@ def find_numbers(text, links):
     return found
 
 
+def find_eta(text, sent):
+    """The expected delivery date after the first ETA label that has one, as a date, or None.
+
+    Dates without a year, weekdays, "today" and "tomorrow" are taken relative to the day
+    the email was sent. For a range like "Oct 20 - Oct 23" the later date is used.
+    """
+    sent_day = datetime.fromtimestamp(sent).date()
+    for label in ETA_LABEL.finditer(text):
+        dates = []
+        for m in ETA_DATE.finditer(text[label.end():label.end() + 60]):
+            g = m.groupdict()
+            try:
+                if g["mon"]:
+                    month, day, year = MONTHS.index(g["mon"].lower()) + 1, int(g["day2"] or g["day"]), g["year"]
+                elif g["nm"]:
+                    month, day, year = int(g["nm"]), int(g["nd"]), g["ny"]
+                elif g["rel"]:
+                    dates.append(sent_day + timedelta(days=g["rel"].lower() == "tomorrow"))
+                    continue
+                else:
+                    ahead = (WEEKDAY_NAMES.index(g["wd"].lower()) - sent_day.weekday()) % 7
+                    dates.append(sent_day + timedelta(days=ahead))
+                    continue
+                if year:
+                    d = date(int(year) + (2000 if len(year) == 2 else 0), month, day)
+                else:
+                    d = date(sent_day.year, month, day)
+                    if d < sent_day - timedelta(days=60):  # "Jan 3" in a late-December email
+                        d = date(sent_day.year + 1, month, day)
+            except ValueError:  # 13/45 and the like
+                continue
+            dates.append(d)
+        dates = [d for d in dates if sent_day - timedelta(days=1) <= d <= sent_day + timedelta(days=45)]
+        if dates:
+            return max(dates)
+    return None
+
+
 def apply_message(pkgs, m):
     """Add or update the packages one email mentions."""
     status = next((s for s, rx in STATUSES if rx.search(m["subject"])), None)
@@ -383,6 +434,9 @@ def apply_message(pkgs, m):
         label = m["subject"].partition(":")[2].strip(' "“”') or "Amazon"
     else:
         found = find_numbers(m["text"], m["links"])
+    # An email listing several packages (like USPS Informed Delivery) may give each its
+    # own date, and there's no telling which date goes with which number.
+    eta = find_eta(m["subject"] + " " + m["text"], m["date"]) if len(found) == 1 else None
     for number, carrier in found.items():
         p = pkgs.get(number)
         if not p:
@@ -391,6 +445,7 @@ def apply_message(pkgs, m):
                 "carrier": carrier, "label": label, "label_from_carrier": from_carrier,
                 "status": status or "Shipped", "status_at": m["date"], "updated": m["date"],
                 "link": (AMAZON_ORDER_LINK if is_order else CARRIER_LINKS[carrier]).format(number),
+                "eta": eta and eta.isoformat(), "eta_at": m["date"],
             }
             continue
         if p["label_from_carrier"] and not from_carrier:  # "Target" says more than "UPS"
@@ -398,6 +453,8 @@ def apply_message(pkgs, m):
         # Emails can be read out of order; the newest one with a status wins. Delivered is final.
         if status and p["status"] != "Delivered" and m["date"] >= p["status_at"]:
             p["status"], p["status_at"] = status, m["date"]
+        if eta and m["date"] >= p.get("eta_at", 0):  # a newer email may move the date
+            p["eta"], p["eta_at"] = eta.isoformat(), m["date"]
         p["updated"] = max(p["updated"], m["date"])
 
 
@@ -482,11 +539,13 @@ def packages_loop():
 def packages_view():
     if not packages_enabled():
         return {"enabled": False, "packages": []}
-    items = sorted(_packages.values(), key=lambda p: (STATUS_ORDER.get(p["status"], 2), -p["status_at"]))
+    # Within a status, soonest expected delivery first; packages without a date after those.
+    items = sorted(_packages.values(), key=lambda p: (
+        STATUS_ORDER.get(p["status"], 2), p.get("eta") or "9999", -p["status_at"]))
     return {
         "enabled": True,
         "error": _packages_error,
-        "packages": [{k: p[k] for k in ("carrier", "label", "status", "status_at", "link")} for p in items],
+        "packages": [{k: p[k] for k in ("carrier", "label", "status", "status_at", "link")} | {"eta": p.get("eta")} for p in items],
     }
 
 

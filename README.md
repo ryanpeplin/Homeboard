@@ -299,10 +299,15 @@ The **Deliveries** panel in the sidebar lists packages on the way. The server fi
   - USPS and FedEx numbers are just digits, so they only count when they come right after a label like "Tracking number:" or appear in a tracking link. That keeps order and phone numbers out.
 - **Amazon orders:** Amazon's own emails rarely include a tracking number, so the panel follows the order number instead. It shows the item name from Amazon's *Shipped:*, *Out for delivery:* and *Delivered:* emails, and ignores *Ordered:* emails.
 - **Status:** *Shipped*, *Out for delivery*, *Delayed* or *Delivered*, from the newest email's subject. Once a package is delivered it stays delivered.
+- **Expected delivery date:** read from wording like "Expected delivery on Tuesday, October 20", "Scheduled Delivery: 10/20/2026", "Arriving tomorrow" or "Estimated delivery: Oct 20 – 23". A shipped package then shows *Arrives today*, *Arrives tomorrow*, *Arrives Tue*, or a date like *Arrives Oct 28* when it's more than a week out.
+  - Dates without a year, weekdays and "tomorrow" count from the day the email was sent. For a range, the later date is used.
+  - A newer email with a different date replaces the old one.
+  - If no date is found, or the date passes without a newer email, the package just shows *Shipped*.
+  - Emails that list several packages (like USPS Informed Delivery) don't set a date, since there's no telling which date belongs to which package.
 - **Name:** the store the email came from, such as "Target". If the first email came from the carrier, a later email from the store replaces it.
 
 ### On the board
-- The list is sorted with *Out for delivery* first and *Delivered* last. Up to 4 packages show, then "+N more".
+- The list is sorted with *Out for delivery* first and *Delivered* last, and shipped packages by expected date, soonest first. Up to 4 packages show, then "+N more".
 - On other devices, clicking a package opens its tracking page. The Pi's own screen shows no links, so a tap can't take the kiosk away from the board.
 - The panel is hidden when nothing is on the way. If Gmail can't be read, the panel shows "Not updating" and the reason.
 - The first check reads up to 300 shipping emails from the last `days` days and can take a minute or two on the Pi. Later checks only read new emails.
