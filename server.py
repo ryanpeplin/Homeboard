@@ -1,10 +1,16 @@
 """Homeboard: a small self-hosted DAKboard-style wall display server.
 
 Serves static/ and a JSON API that proxies calendars (iCal), weather (Open-Meteo),
-Fitbit steps (via the Google Health API) and Spotify now-playing. Run:  python server.py
+Fitbit steps (via the Google Health API), Spotify now-playing, and package deliveries
+found in Gmail (over IMAP). Run:  python server.py
 """
+import email
+import email.policy
+import email.utils
+import imaplib
 import json
 import mimetypes
+import re
 import secrets
 import ssl
 import subprocess
@@ -15,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -244,6 +251,245 @@ SPOTIFY_ACTIONS = {
 }
 
 
+# ---------- packages (tracking numbers from Gmail) ----------
+
+PACKAGES_FILE = ROOT / "packages.json"
+CARRIER_LINKS = {
+    "UPS": "https://www.ups.com/track?tracknum={}",
+    "USPS": "https://tools.usps.com/go/TrackConfirmAction?tLabels={}",
+    "FedEx": "https://www.fedex.com/fedextrack/?trknbr={}",
+    "Amazon": "https://track.amazon.com/tracking/{}",
+}
+AMAZON_ORDER_LINK = "https://www.amazon.com/gp/your-account/order-details?orderID={}"
+AMAZON_ORDER = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
+CARRIER_DOMAINS = ("ups.com", "fedex.com", "usps.com")
+# These formats can't be mistaken for anything else, so they're taken anywhere in an email.
+DISTINCT = [("UPS", re.compile(r"\b1Z[0-9A-Z]{16}\b", re.I)), ("Amazon", re.compile(r"\bTBA\d{12}\b", re.I))]
+# Bare digit strings also turn up as order and account numbers, so these only count
+# right after a label like "Tracking number:" or inside a tracking link.
+DIGITS = [("USPS", re.compile(r"(?<!\d)9[1-5](?: ?\d){18,20}(?!\d)")), ("FedEx", re.compile(r"(?<!\d)(?:\d{15}|\d{12})(?!\d)"))]
+TRACK_LABEL = re.compile(r"track(?:ing)?\s*(?:number|no\.?|num|#|id|code)?(?:\(s\)|s)?\s*(?:is)?\s*[:#.]?\s*$", re.I)
+TRACK_PARAM = re.compile(
+    r"(?:tracknums?|trknbr|tracknumbers|tlabels|qtc_tlabels1|inquirynumber1|tracking_?numbers?|tracking_?id)=([0-9A-Za-z]{10,34})", re.I)
+# Checked in order against the subject line only. Bodies often carry a whole
+# "Ordered > Shipped > Out for delivery > Delivered" progress bar, so they'd match everything.
+STATUSES = [
+    ("Delayed", re.compile(r"delay|exception|attempted|unable to deliver", re.I)),
+    ("Delivered", re.compile(r"(?<!be )(?<!being )\bdelivered\b", re.I)),
+    ("Out for delivery", re.compile(r"out for delivery|(?:delivery|delivered|arriving|arrives) today", re.I)),
+    ("Shipped", re.compile(r"shipped|on (?:its|the) way|in transit|shipment|tracking", re.I)),
+]
+STATUS_ORDER = {"Out for delivery": 0, "Delayed": 1, "Shipped": 2, "Delivered": 3}
+_packages = {}
+_packages_error = None
+
+
+class _HTMLText(HTMLParser):
+    """Collect an HTML email's visible text and link targets."""
+
+    def __init__(self):
+        super().__init__()
+        self.parts, self.links, self._skip = [], [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("head", "style", "script"):
+            self._skip += 1
+        elif tag == "a":
+            self.links += [v for k, v in attrs if k == "href" and v]
+        self.parts.append(" ")  # keep "Tracking number:" and the number in the next cell apart
+
+    def handle_endtag(self, tag):
+        if tag in ("head", "style", "script"):
+            self._skip = max(0, self._skip - 1)
+        self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
+def read_message(raw):
+    msg = email.message_from_bytes(raw, policy=email.policy.default)
+    texts, links = [], []
+    for part in msg.walk():
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html") or part.is_attachment():
+            continue
+        try:
+            body = part.get_content()
+        except Exception:  # unknown charset and the like
+            continue
+        if ctype == "text/html":
+            parser = _HTMLText()
+            parser.feed(body)
+            body, links = "".join(parser.parts), links + parser.links
+        else:
+            links += re.findall(r"https?://\S+", body)
+        texts.append(body)
+    name, addr = email.utils.parseaddr(str(msg.get("From", "")))
+    domain = addr.rpartition("@")[2].lower()
+    try:
+        sent = email.utils.parsedate_to_datetime(str(msg["Date"])).timestamp()
+    except Exception:
+        sent = time.time()
+    return {
+        "subject": re.sub(r"\s+", " ", str(msg.get("Subject", ""))).strip(),
+        "sender": name.strip() or domain.removeprefix("www."),
+        "domain": domain,
+        "date": sent,
+        "text": re.sub(r"\s+", " ", " ".join(texts)),
+        "links": links,
+    }
+
+
+def classify(number):
+    """Return (carrier or None, normalized number) for a candidate tracking number."""
+    number = number.replace(" ", "").upper()
+    for carrier, rx in DISTINCT + DIGITS:
+        if rx.fullmatch(number):
+            return carrier, number
+    return None, number
+
+
+def find_numbers(text, links):
+    found = {}
+    for carrier, rx in DISTINCT:
+        for m in rx.finditer(text):
+            found[m.group().upper()] = carrier
+    for carrier, rx in DIGITS:
+        for m in rx.finditer(text):
+            if TRACK_LABEL.search(text[max(0, m.start() - 60):m.start()]):
+                found.setdefault(m.group().replace(" ", ""), carrier)
+    for href in links:
+        # Retailers often wrap the carrier link in a click-tracking redirect, hence the double unquote.
+        for m in TRACK_PARAM.finditer(urllib.parse.unquote(urllib.parse.unquote(href))):
+            carrier, number = classify(m.group(1))
+            if carrier:
+                found.setdefault(number, carrier)
+    return found
+
+
+def apply_message(pkgs, m):
+    """Add or update the packages one email mentions."""
+    status = next((s for s, rx in STATUSES if rx.search(m["subject"])), None)
+    label, from_carrier = m["sender"], m["domain"].endswith(CARRIER_DOMAINS)
+    if re.search(r"(^|\.)amazon\.", m["domain"]):
+        # Amazon's own emails rarely include a tracking number, so follow the order
+        # instead. Subjects look like 'Shipped: "Item name..."'. "Ordered:" is skipped.
+        order = AMAZON_ORDER.search(m["text"]) or AMAZON_ORDER.search(m["subject"])
+        if not order or not status:
+            return
+        found = {order.group(): "Amazon"}
+        label = m["subject"].partition(":")[2].strip(' "“”') or "Amazon"
+    else:
+        found = find_numbers(m["text"], m["links"])
+    for number, carrier in found.items():
+        p = pkgs.get(number)
+        if not p:
+            is_order = AMAZON_ORDER.fullmatch(number)
+            pkgs[number] = {
+                "carrier": carrier, "label": label, "label_from_carrier": from_carrier,
+                "status": status or "Shipped", "status_at": m["date"], "updated": m["date"],
+                "link": (AMAZON_ORDER_LINK if is_order else CARRIER_LINKS[carrier]).format(number),
+            }
+            continue
+        if p["label_from_carrier"] and not from_carrier:  # "Target" says more than "UPS"
+            p["label"], p["label_from_carrier"] = label, False
+        # Emails can be read out of order; the newest one with a status wins. Delivered is final.
+        if status and p["status"] != "Delivered" and m["date"] >= p["status_at"]:
+            p["status"], p["status_at"] = status, m["date"]
+        p["updated"] = max(p["updated"], m["date"])
+
+
+def load_packages():
+    if PACKAGES_FILE.exists():
+        return json.loads(PACKAGES_FILE.read_text(encoding="utf-8"))
+    return {}
+
+
+def all_mail_box(imap):
+    """Gmail's All Mail folder (its name depends on the account's language), so archived mail counts too."""
+    _, boxes = imap.list()
+    for line in boxes:
+        if isinstance(line, bytes) and "\\All" in line.decode().partition(")")[0]:
+            return line.decode().rpartition(' "/" ')[2]
+    return "INBOX"
+
+
+def refresh_packages():
+    """Read new shipping emails since the last run and update packages.json."""
+    global _packages
+    cfg = CONFIG["packages"]
+    days = cfg.get("days", 14)
+    state = load_packages()
+    pkgs = state.get("packages", {})
+    imap = imaplib.IMAP4_SSL("imap.gmail.com", ssl_context=SSL, timeout=60)
+    try:
+        try:
+            imap.login(cfg["email"], cfg["app_password"].replace(" ", ""))
+        except imaplib.IMAP4.error as e:
+            raise RuntimeError(f"Gmail sign-in failed, check the email and app password ({e})")
+        typ, _ = imap.select(all_mail_box(imap), readonly=True)  # readonly: never marks mail as read
+        if typ != "OK":
+            raise RuntimeError("couldn't open the mailbox")
+        validity = (imap.response("UIDVALIDITY")[1][0] or b"").decode()
+        last_uid = state.get("last_uid", 0) if state.get("uidvalidity") == validity else 0
+        # Gmail search syntax; {a b} means a OR b. Only messages since the last run are fetched.
+        query = ["X-GM-RAW", f'"newer_than:{days}d {{tracking shipped shipment delivered delivery}}"']
+        if last_uid:
+            query = ["UID", f"{last_uid + 1}:*"] + query
+        _, data = imap.uid("SEARCH", *query)
+        uids = [u for u in map(int, data[0].split()) if u > last_uid][-300:]
+        for i in range(0, len(uids), 25):
+            _, data = imap.uid("FETCH", ",".join(map(str, uids[i:i + 25])), "(BODY.PEEK[])")
+            for item in data:
+                if isinstance(item, tuple):
+                    apply_message(pkgs, read_message(item[1]))
+        last_uid = max(uids + [last_uid])
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    now = time.time()
+    pkgs = {
+        k: p for k, p in pkgs.items()
+        if now - p["updated"] < days * 86400
+        and not (p["status"] == "Delivered" and now - p["status_at"] > cfg.get("keep_delivered_days", 2) * 86400)
+    }
+    PACKAGES_FILE.write_text(json.dumps({"uidvalidity": validity, "last_uid": last_uid, "packages": pkgs}, indent=2), encoding="utf-8")
+    _packages = pkgs
+
+
+def packages_enabled():
+    cfg = CONFIG.get("packages") or {}
+    return bool(cfg.get("email") and cfg.get("app_password"))
+
+
+def packages_loop():
+    global _packages, _packages_error
+    _packages = load_packages().get("packages", {})  # show the last known list right after a restart
+    while True:
+        try:
+            refresh_packages()
+            _packages_error = None
+        except Exception as e:
+            _packages_error = str(e)
+            print(f"packages: {e}", flush=True)
+        time.sleep(CONFIG["packages"].get("refresh_minutes", 15) * 60)
+
+
+def packages_view():
+    if not packages_enabled():
+        return {"enabled": False, "packages": []}
+    items = sorted(_packages.values(), key=lambda p: (STATUS_ORDER.get(p["status"], 2), -p["status_at"]))
+    return {
+        "enabled": True,
+        "error": _packages_error,
+        "packages": [{k: p[k] for k in ("carrier", "label", "status", "status_at", "link")} for p in items],
+    }
+
+
 # ---------- sleep schedule ----------
 
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -349,6 +595,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, cached("fitbit", 5 * 60, fetch_fitbit))
             if path == "/api/spotify":
                 return self.send(200, fetch_spotify())
+            if path == "/api/packages":
+                return self.send(200, packages_view())
             if path.startswith("/auth/"):
                 return self.auth(path.split("/")[2], path.endswith("/callback"), params)
             return self.static(path)
@@ -398,4 +646,6 @@ class Server(ThreadingHTTPServer):
 if __name__ == "__main__":
     print(f"Homeboard on http://127.0.0.1:{PORT}  (and on this machine's LAN IP)")
     threading.Thread(target=sleep_loop, daemon=True).start()
+    if packages_enabled():
+        threading.Thread(target=packages_loop, daemon=True).start()
     Server(("0.0.0.0", PORT), Handler).serve_forever()

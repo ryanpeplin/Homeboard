@@ -209,6 +209,33 @@ async function spotify(action) {
 document.querySelectorAll("#sp-controls [data-act]").forEach((b) => b.onclick = () => spotify(b.dataset.act));
 $("sp-toggle").onclick = () => spotify(playing ? "pause" : "play");
 
+// ---------- packages ----------
+
+const PK_ICON = { "Out for delivery": "fa-truck-fast", "Delayed": "fa-triangle-exclamation", "Delivered": "fa-circle-check" };
+const PK_MAX = 4;  // rows that fit in the sidebar
+async function loadPackages() {
+  try {
+    const { data, changed } = await getJSON("packages", "/api/packages");
+    if (data.error) console.warn("packages:", data.error);
+    if (!changed) return;
+    const list = data.packages;
+    $("packages").hidden = !list.length && !data.error;
+    const rows = list.slice(0, PK_MAX).map((p) => {
+      // Links only off the wall display, where a tap would navigate the kiosk away from the board.
+      const row = el(IS_KIOSK ? "div" : "a", "pk" + (p.status === "Out for delivery" ? " out" : ""));
+      if (!IS_KIOSK) { row.href = p.link; row.target = "_blank"; row.rel = "noopener"; }
+      const day = p.status === "Delivered"
+        ? " " + new Date(p.status_at * 1000).toLocaleDateString(undefined, { weekday: "short" }) : "";
+      row.append(el("i", `fa-solid ${PK_ICON[p.status] || "fa-box"}`), el("span", "pk-label", p.label),
+        el("span", "pk-status", p.status + day));
+      return row;
+    });
+    if (list.length > PK_MAX) rows.push(el("div", "pk-more", `+${list.length - PK_MAX} more`));
+    if (data.error) rows.push(el("div", "pk-more", `Not updating: ${data.error}`));
+    $("pk-list").replaceChildren(...rows);
+  } catch (e) { console.warn(e); }
+}
+
 // ---------- sleep ----------
 
 // Only the wall display itself (its kiosk opens http://localhost:8080) follows the
@@ -224,7 +251,7 @@ async function loadSleep() {
     if (data.asleep === asleep) return;
     asleep = data.asleep;
     $("sleep").hidden = !asleep;
-    if (!asleep) { loadCalendar(true); loadWeather(true); loadFitbit(); loadSpotify(); }
+    if (!asleep) { loadCalendar(true); loadWeather(true); loadFitbit(); loadSpotify(); loadPackages(); }
   } catch (e) { console.warn(e); }
 }
 // Skip the network-heavy pollers while the screen is dark.
@@ -245,5 +272,6 @@ const whenAwake = (fn) => () => { if (!asleep) fn(); };
   loadWeather();  setInterval(loadWeather, 15 * 60000);
   loadFitbit();   setInterval(whenAwake(loadFitbit), 5 * 60000);
   loadSpotify();  setInterval(whenAwake(loadSpotify), 10000);
+  loadPackages(); setInterval(whenAwake(loadPackages), 5 * 60000);
   loadSleep();    setInterval(loadSleep, 30000);
 })();
