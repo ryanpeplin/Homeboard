@@ -275,7 +275,7 @@ TRACK_PARAM = re.compile(
 # "Ordered > Shipped > Out for delivery > Delivered" progress bar, so they'd match everything.
 STATUSES = [
     ("Delayed", re.compile(r"delay|exception|attempted|unable to deliver", re.I)),
-    ("Delivered", re.compile(r"(?<!be )(?<!being )\bdelivered\b", re.I)),
+    ("Delivered", re.compile(r"(?<!be )(?<!being )\bdelivered\b|\b(?:is|are) here\b|\b(?:has|have) arrived\b", re.I)),
     ("Out for delivery", re.compile(r"out for delivery|(?:delivery|delivered|arriving|arrives) today", re.I)),
     ("Shipped", re.compile(r"shipped|on (?:its|the) way|in transit|shipment|tracking", re.I)),
 ]
@@ -293,6 +293,9 @@ ETA_DATE = re.compile(
     r"|\b(?P<nm>\d{1,2})/(?P<nd>\d{1,2})(?:/(?P<ny>\d{2}(?:\d{2})?))?\b"
     r"|\b(?P<rel>today|tomorrow)\b"
     r"|\b(?P<wd>mon|tue|wed|thu|fri|sat|sun)(?:day|s|sday|nesday|rs|rsday|urday)?\b\.?", re.I)
+# Bump when packages.json's contents would differ under the current parsing rules;
+# the next run then rebuilds it from the mailbox.
+PACKAGES_VERSION = 2
 _packages = {}
 _packages_error = None
 
@@ -424,14 +427,22 @@ def apply_message(pkgs, m):
     """Add or update the packages one email mentions."""
     status = next((s for s, rx in STATUSES if rx.search(m["subject"])), None)
     label, from_carrier = m["sender"], m["domain"].endswith(CARRIER_DOMAINS)
+    orders = set()
     if re.search(r"(^|\.)amazon\.", m["domain"]):
         # Amazon's own emails rarely include a tracking number, so follow the order
-        # instead. Subjects look like 'Shipped: "Item name..."'. "Ordered:" is skipped.
-        order = AMAZON_ORDER.search(m["text"]) or AMAZON_ORDER.search(m["subject"])
-        if not order or not status:
+        # instead. Subjects look like 'Shipped: "Item name..." and 1 more item'. "Ordered:" is skipped.
+        # A package can hold items from several orders, and Amazon's emails for it don't
+        # agree on which one is "Order #", so a package matches on any order number it shares.
+        orders = set(AMAZON_ORDER.findall(" ".join([m["subject"], m["text"]] + m["links"])))
+        if not orders or not status:
             return
-        found = {order.group(): "Amazon"}
-        label = m["subject"].partition(":")[2].strip(' "“”') or "Amazon"
+        key = next((k for k, p in pkgs.items() if orders & set(p.get("orders", []))), None)
+        if not key:
+            key = AMAZON_ORDER.search(m["subject"] + " " + m["text"])
+            key = key.group() if key else min(orders)
+        found = {key: "Amazon"}
+        item = re.search(r'"(.+?)(?:\.\.\.|…)?"(?:\s+and\s+(\d+)\s+more)?', m["subject"])
+        label = (item.group(1) + (f" +{item.group(2)}" if item.group(2) else "")) if item else "Amazon"
     else:
         found = find_numbers(m["text"], m["links"])
     # An email listing several packages (like USPS Informed Delivery) may give each its
@@ -447,11 +458,17 @@ def apply_message(pkgs, m):
                 "link": (AMAZON_ORDER_LINK if is_order else CARRIER_LINKS[carrier]).format(number),
                 "eta": eta and eta.isoformat(), "eta_at": m["date"],
             }
+            if orders:
+                pkgs[number]["orders"] = sorted(orders)
             continue
+        if orders:
+            p["orders"] = sorted(set(p.get("orders", [])) | orders)
         if p["label_from_carrier"] and not from_carrier:  # "Target" says more than "UPS"
             p["label"], p["label_from_carrier"] = label, False
-        # Emails can be read out of order; the newest one with a status wins. Delivered is final.
-        if status and p["status"] != "Delivered" and m["date"] >= p["status_at"]:
+        # Emails can be read out of order; the newest one with a status wins. Delivered is
+        # final, except that a later Amazon "Shipped:" for the same order is another shipment.
+        final = p["status"] == "Delivered" and not (carrier == "Amazon" and AMAZON_ORDER.fullmatch(number))
+        if status and not final and m["date"] >= p["status_at"]:
             p["status"], p["status_at"] = status, m["date"]
         if eta and m["date"] >= p.get("eta_at", 0):  # a newer email may move the date
             p["eta"], p["eta_at"] = eta.isoformat(), m["date"]
@@ -473,12 +490,36 @@ def all_mail_box(imap):
     return "INBOX"
 
 
+def prune_packages(pkgs, days, keep_delivered_days, now=None):
+    """Drop packages that are done, including ones whose last email never came.
+
+    Not every store sends a delivered email (and Amazon sometimes doesn't), so a package
+    still out for delivery a day later counts as delivered, and a shipped one is dropped
+    once its expected date is more than keep_delivered_days past.
+    """
+    now = now or time.time()
+    keep = keep_delivered_days * 86400
+    today = datetime.fromtimestamp(now).date()
+    kept = {}
+    for k, p in pkgs.items():
+        if p["status"] == "Out for delivery" and now - p["status_at"] > 86400:
+            p["status"] = "Delivered"
+        if now - p["updated"] > days * 86400 or (p["status"] == "Delivered" and now - p["status_at"] > keep):
+            continue
+        if p["status"] != "Delivered" and p.get("eta") and date.fromisoformat(p["eta"]) < today - timedelta(days=keep_delivered_days):
+            continue
+        kept[k] = p
+    return kept
+
+
 def refresh_packages():
     """Read new shipping emails since the last run and update packages.json."""
     global _packages
     cfg = CONFIG["packages"]
     days = cfg.get("days", 14)
     state = load_packages()
+    if state.get("version") != PACKAGES_VERSION:
+        state = {}
     pkgs = state.get("packages", {})
     imap = imaplib.IMAP4_SSL("imap.gmail.com", ssl_context=SSL, timeout=60)
     try:
@@ -508,13 +549,9 @@ def refresh_packages():
             imap.logout()
         except Exception:
             pass
-    now = time.time()
-    pkgs = {
-        k: p for k, p in pkgs.items()
-        if now - p["updated"] < days * 86400
-        and not (p["status"] == "Delivered" and now - p["status_at"] > cfg.get("keep_delivered_days", 2) * 86400)
-    }
-    PACKAGES_FILE.write_text(json.dumps({"uidvalidity": validity, "last_uid": last_uid, "packages": pkgs}, indent=2), encoding="utf-8")
+    pkgs = prune_packages(pkgs, days, cfg.get("keep_delivered_days", 2))
+    PACKAGES_FILE.write_text(json.dumps(
+        {"version": PACKAGES_VERSION, "uidvalidity": validity, "last_uid": last_uid, "packages": pkgs}, indent=2), encoding="utf-8")
     _packages = pkgs
 
 

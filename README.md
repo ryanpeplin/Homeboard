@@ -297,8 +297,11 @@ The **Deliveries** panel in the sidebar lists packages on the way. The server fi
 ### What it finds
 - **UPS** (`1Z…`), **USPS** (20–22 digits starting with 9x), **FedEx** (12 or 15 digits) and **Amazon Logistics** (`TBA…`) tracking numbers, in the email text or inside "Track package" links.
   - USPS and FedEx numbers are just digits, so they only count when they come right after a label like "Tracking number:" or appear in a tracking link. That keeps order and phone numbers out.
-- **Amazon orders:** Amazon's own emails rarely include a tracking number, so the panel follows the order number instead. It shows the item name from Amazon's *Shipped:*, *Out for delivery:* and *Delivered:* emails, and ignores *Ordered:* emails.
-- **Status:** *Shipped*, *Out for delivery*, *Delayed* or *Delivered*, from the newest email's subject. Once a package is delivered it stays delivered.
+- **Amazon orders:** Amazon's own emails rarely include a tracking number, so the panel follows the order number instead. It shows the item name from Amazon's *Shipped:*, *Out for delivery:* and *Delivered:* emails (e.g. *Zevo Flying Insect Trap +1*), and ignores *Ordered:* emails.
+  - One Amazon package can contain items from several orders, and Amazon's emails don't always list the same order number first. An email is matched to a package if it shares any order number with it.
+  - A later *Shipped:* email for an order that was already delivered means another shipment, so the package shows as shipped again.
+- **Status:** *Shipped*, *Out for delivery*, *Delayed* or *Delivered*, from the newest email's subject. Subjects like "Your package is here" or "has arrived" also count as delivered. Once a package is delivered it stays delivered.
+- **When no delivered email comes:** some stores never send one, and Amazon sometimes doesn't. A package still *Out for delivery* a day later counts as delivered. A shipped package is dropped once its expected date is more than `keep_delivered_days` past.
 - **Expected delivery date:** read from wording like "Expected delivery on Tuesday, October 20", "Scheduled Delivery: 10/20/2026", "Arriving tomorrow" or "Estimated delivery: Oct 20 – 23". A shipped package then shows *Arrives today*, *Arrives tomorrow*, *Arrives Tue*, or a date like *Arrives Oct 28* when it's more than a week out.
   - Dates without a year, weekdays and "tomorrow" count from the day the email was sent. For a range, the later date is used.
   - A newer email with a different date replaces the old one.
