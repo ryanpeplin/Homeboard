@@ -211,20 +211,20 @@ $("sp-toggle").onclick = () => spotify(playing ? "pause" : "play");
 
 // ---------- packages ----------
 
-const PK_ICON = { "Out for delivery": "fa-truck-fast", "Delayed": "fa-triangle-exclamation", "Delivered": "fa-circle-check" };
+const PK_ICON = { "Out for delivery": "fa-truck-fast", "Delayed": "fa-triangle-exclamation", "Delivered": "fa-circle-check", "Ordered": "fa-receipt" };
 const PK_MAX = 4;  // rows that fit in the sidebar
 
 function pkStatus(p) {
   if (p.status === "Delivered")
     return `Delivered ${new Date(p.status_at * 1000).toLocaleDateString(undefined, { weekday: "short" })}`;
-  if (!["Shipped", "Delayed"].includes(p.status) || !p.eta) return p.status;
+  if (!["Shipped", "Delayed", "Ordered"].includes(p.status) || !p.eta) return p.status;
   const [y, m, d] = p.eta.split("-").map(Number);
   const eta = new Date(y, m - 1, d), now = new Date();
   const days = Math.round((eta - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / DAY);
   if (days < 0) return p.status;  // the date has passed without a newer email
   const when = days === 0 ? "today" : days === 1 ? "tomorrow"
     : days < 7 ? eta.toLocaleDateString(undefined, { weekday: "short" }) : `${MONTHS[eta.getMonth()]} ${eta.getDate()}`;
-  return p.status === "Delayed" ? `Delayed to ${when}` : `Arrives ${when}`;
+  return { Delayed: `Delayed to ${when}`, Ordered: `Ordered, due ${when}` }[p.status] || `Arrives ${when}`;
 }
 async function loadPackages() {
   try {
@@ -235,7 +235,7 @@ async function loadPackages() {
     $("packages").hidden = !list.length && !data.error;
     const rows = list.slice(0, PK_MAX).map((p) => {
       // Links only off the wall display, where a tap would navigate the kiosk away from the board.
-      const row = el(IS_KIOSK ? "div" : "a", "pk" + (p.status === "Out for delivery" ? " out" : ""));
+      const row = el(IS_KIOSK ? "div" : "a", "pk" + ({ "Out for delivery": " out", Ordered: " ordered" }[p.status] || ""));
       if (!IS_KIOSK) { row.href = p.link; row.target = "_blank"; row.rel = "noopener"; }
       row.append(el("i", `fa-solid ${PK_ICON[p.status] || "fa-box"}`), el("span", "pk-label", p.label),
         el("span", "pk-status", pkStatus(p)));

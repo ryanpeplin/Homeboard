@@ -279,7 +279,7 @@ STATUSES = [
     ("Out for delivery", re.compile(r"out for delivery|(?:delivery|delivered|arriving|arrives) today", re.I)),
     ("Shipped", re.compile(r"shipped|on (?:its|the) way|in transit|shipment|tracking", re.I)),
 ]
-STATUS_ORDER = {"Out for delivery": 0, "Delayed": 1, "Shipped": 2, "Delivered": 3}
+STATUS_ORDER = {"Out for delivery": 0, "Delayed": 1, "Shipped": 2, "Ordered": 3, "Delivered": 4}
 # Expected delivery dates are only read right after one of these labels, so order and
 # ship dates elsewhere in the email are ignored.
 ETA_LABEL = re.compile(
@@ -295,7 +295,7 @@ ETA_DATE = re.compile(
     r"|\b(?P<wd>mon|tue|wed|thu|fri|sat|sun)(?:day|s|sday|nesday|rs|rsday|urday)?\b\.?", re.I)
 # Bump when packages.json's contents would differ under the current parsing rules;
 # the next run then rebuilds it from the mailbox.
-PACKAGES_VERSION = 3
+PACKAGES_VERSION = 4
 _packages = {}
 _packages_error = None
 
@@ -404,12 +404,15 @@ def find_numbers(text, links):
     return found
 
 
-def find_eta(text, sent):
+def find_eta(text, sent, latest=False):
     """The expected delivery date after the first ETA label that has one, as a date, or None.
 
     Dates without a year, weekdays, "today" and "tomorrow" are taken relative to the day
     the email was sent. For a range like "Oct 20 - Oct 23" the later date is used.
+    With latest, the latest date after any label: an order confirmation lists one
+    "Arriving ..." per shipment, and the order is complete after the last.
     """
+    found = []
     sent_day = datetime.fromtimestamp(sent).date()
     for label in ETA_LABEL.finditer(text):
         dates = []
@@ -437,9 +440,10 @@ def find_eta(text, sent):
                 continue
             dates.append(d)
         dates = [d for d in dates if sent_day - timedelta(days=1) <= d <= sent_day + timedelta(days=45)]
-        if dates:
+        if dates and not latest:
             return max(dates)
-    return None
+        found += dates
+    return max(found, default=None)
 
 
 def apply_message(pkgs, m):
@@ -453,6 +457,8 @@ def apply_message(pkgs, m):
         # A package can hold items from several orders, and Amazon's emails for it don't
         # agree on which one is "Order #", so a package matches on any order number it shares.
         orders = set(AMAZON_ORDER.findall(" ".join([m["subject"], m["text"]] + m["links"])))
+        if not status and re.match(r"ordered\b", m["subject"], re.I):
+            status = "Ordered"  # not shipped yet; later emails for the order update the same row
         if not status and re.search(r"delivery (?:estimate|date) update", m["subject"], re.I):
             status = "Delayed" if re.search(r"\bdelayed\b", m["text"], re.I) else None
         key = next((k for k, p in pkgs.items() if orders & set(p.get("orders", []))), None)
@@ -464,12 +470,12 @@ def apply_message(pkgs, m):
             key = key.group() if key else min(orders)
         found = {key: "Amazon"}
         item = re.search(r'"(.+?)(?:\.\.\.|…)?"(?:\s+and\s+(\d+)\s+more)?', m["subject"])
-        label = (item.group(1) + (f" +{item.group(2)}" if item.group(2) else "")) if item else m.get("item") or "Amazon"
+        label = (item.group(1).rstrip(" ,;:-") + (f" +{item.group(2)}" if item.group(2) else "")) if item else m.get("item") or "Amazon"
     else:
         found = find_numbers(m["text"], m["links"])
     # An email listing several packages (like USPS Informed Delivery) may give each its
     # own date, and there's no telling which date goes with which number.
-    eta = find_eta(m["subject"] + " " + m["text"], m["date"]) if len(found) == 1 else None
+    eta = find_eta(m["subject"] + " " + m["text"], m["date"], latest=status == "Ordered") if len(found) == 1 else None
     for number, carrier in found.items():
         p = pkgs.get(number)
         if not p:
@@ -557,7 +563,7 @@ def refresh_packages():
         validity = (imap.response("UIDVALIDITY")[1][0] or b"").decode()
         last_uid = state.get("last_uid", 0) if state.get("uidvalidity") == validity else 0
         # Gmail search syntax; {a b} means a OR b. Only messages since the last run are fetched.
-        query = ["X-GM-RAW", f'"newer_than:{days}d {{tracking shipped shipment delivered delivery}}"']
+        query = ["X-GM-RAW", f'"newer_than:{days}d {{tracking ordered shipped shipment delivered delivery}}"']
         if last_uid:
             query = ["UID", f"{last_uid + 1}:*"] + query
         _, data = imap.uid("SEARCH", *query)

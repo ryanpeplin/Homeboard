@@ -297,12 +297,14 @@ The **Deliveries** panel in the sidebar lists packages on the way. The server fi
 ### What it finds
 - **UPS** (`1Z…`), **USPS** (20–22 digits starting with 9x), **FedEx** (12 or 15 digits) and **Amazon Logistics** (`TBA…`) tracking numbers, in the email text or inside "Track package" links.
   - USPS and FedEx numbers are just digits, so they only count when they come right after a label like "Tracking number:" or appear in a tracking link. That keeps order and phone numbers out.
-- **Amazon orders:** Amazon's own emails rarely include a tracking number, so the panel follows the order number instead. It shows the item name from Amazon's *Shipped:*, *Out for delivery:* and *Delivered:* emails (e.g. *Zevo Flying Insect Trap +1*), and ignores *Ordered:* emails.
+- **Amazon orders:** Amazon's own emails rarely include a tracking number, so the panel follows the order number instead. It shows the item name from Amazon's emails (e.g. *Zevo Flying Insect Trap +1*).
+  - **Orders that haven't shipped yet:** an *Ordered:* email adds the order as *Ordered, due Fri*, dimmed, using the latest "Arriving …" date in the email. When it ships, the same row turns into *Shipped*. An order Amazon sends in several shipments stays one row.
+  - Only Amazon orders show before they ship. Other stores' order confirmations use a different order number (or come from a different address) than their shipping emails, so the board couldn't connect the two.
   - One Amazon package can contain items from several orders, and Amazon's emails don't always list the same order number first. An email is matched to a package if it shares any order number with it.
   - A later email for an order that was already delivered means another shipment, so the package shows as on the way again, with that shipment's item and date.
   - *Delivery estimate update* emails count as *Delayed* when they say the package is delayed, and the board shows the new date, e.g. *Delayed to Wed*. When the subject doesn't name the item, the name comes from the email's item list.
-- **Status:** *Shipped*, *Out for delivery*, *Delayed* or *Delivered*, from the newest email's subject. Subjects like "Your package is here" or "has arrived" also count as delivered. Once a package is delivered it stays delivered.
-- **When no delivered email comes:** some stores never send one, and Amazon sometimes doesn't. A package still *Out for delivery* a day later counts as delivered. A shipped package is dropped once its expected date is more than `keep_delivered_days` past.
+- **Status:** *Ordered* (Amazon only), *Shipped*, *Out for delivery*, *Delayed* or *Delivered*, from the newest email's subject. Subjects like "Your package is here" or "has arrived" also count as delivered. Once a package is delivered it stays delivered.
+- **When no delivered email comes:** some stores never send one, and Amazon sometimes doesn't. A package still *Out for delivery* a day later counts as delivered. A shipped or ordered package is dropped once its expected date is more than `keep_delivered_days` past.
 - **Expected delivery date:** read from wording like "Expected delivery on Tuesday, October 20", "Scheduled Delivery: 10/20/2026", "Arriving tomorrow" or "Estimated delivery: Oct 20 – 23". A shipped package then shows *Arrives today*, *Arrives tomorrow*, *Arrives Tue*, or a date like *Arrives Oct 28* when it's more than a week out.
   - Dates without a year, weekdays and "tomorrow" count from the day the email was sent. For a range, the later date is used.
   - A newer email with a different date replaces the old one.
@@ -311,7 +313,7 @@ The **Deliveries** panel in the sidebar lists packages on the way. The server fi
 - **Name:** the store the email came from, such as "Target". If the first email came from the carrier, a later email from the store replaces it.
 
 ### On the board
-- The list is sorted with *Out for delivery* first and *Delivered* last, and shipped packages by expected date, soonest first. Up to 4 packages show, then "+N more".
+- The list is sorted *Out for delivery*, *Delayed*, *Shipped*, *Ordered*, then *Delivered*, and within each by expected date, soonest first. Up to 4 packages show, then "+N more".
 - On other devices, clicking a package opens its tracking page. The Pi's own screen shows no links, so a tap can't take the kiosk away from the board.
 - The panel is hidden when nothing is on the way. If Gmail can't be read, the panel shows "Not updating" and the reason.
 - The first check reads up to 300 shipping emails from the last `days` days and can take a minute or two on the Pi. Later checks only read new emails.
