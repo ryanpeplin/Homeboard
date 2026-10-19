@@ -295,13 +295,15 @@ ETA_DATE = re.compile(
     r"|\b(?P<wd>mon|tue|wed|thu|fri|sat|sun)(?:day|s|sday|nesday|rs|rsday|urday)?\b\.?", re.I)
 # Bump when packages.json's contents would differ under the current parsing rules;
 # the next run then rebuilds it from the mailbox.
-PACKAGES_VERSION = 2
+PACKAGES_VERSION = 3
 _packages = {}
 _packages_error = None
 
 
 class _HTMLText(HTMLParser):
     """Collect an HTML email's visible text and link targets."""
+
+    BLOCKS = {"p", "div", "td", "tr", "li", "br", "table", "h1", "h2", "h3", "h4", "h5", "h6"}
 
     def __init__(self):
         super().__init__()
@@ -312,12 +314,13 @@ class _HTMLText(HTMLParser):
             self._skip += 1
         elif tag == "a":
             self.links += [v for k, v in attrs if k == "href" and v]
-        self.parts.append(" ")  # keep "Tracking number:" and the number in the next cell apart
+        # Keep "Tracking number:" and the number in the next cell apart, and blocks on their own lines.
+        self.parts.append("\n" if tag in self.BLOCKS else " ")
 
     def handle_endtag(self, tag):
         if tag in ("head", "style", "script"):
             self._skip = max(0, self._skip - 1)
-        self.parts.append(" ")
+        self.parts.append("\n" if tag in self.BLOCKS else " ")
 
     def handle_data(self, data):
         if not self._skip:
@@ -355,7 +358,23 @@ def read_message(raw):
         "date": sent,
         "text": re.sub(r"\s+", " ", " ".join(texts)),
         "links": links,
+        "item": item_name("\n".join(texts)),
     }
+
+
+def item_name(text):
+    """The first item in an order email: the line before "Quantity: 1", minus bullets and a trailing "..."."""
+    # Amazon pads its HTML with lines of non-breaking spaces and zero-width characters.
+    lines = [re.sub(r"[\u00ad\u034f\u200b-\u200f\u202a-\u202e]", "", line).strip().strip("*•-").strip()
+             for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    for i, line in enumerate(lines[1:], 1):
+        if line.lower().startswith("quantity"):
+            name = lines[i - 1]
+            if name.endswith(("...", "…")):  # Amazon cuts names mid-word; drop the partial word
+                name = name.rstrip(".…").rsplit(" ", 1)[0]
+            return name
+    return None
 
 
 def classify(number):
@@ -434,15 +453,18 @@ def apply_message(pkgs, m):
         # A package can hold items from several orders, and Amazon's emails for it don't
         # agree on which one is "Order #", so a package matches on any order number it shares.
         orders = set(AMAZON_ORDER.findall(" ".join([m["subject"], m["text"]] + m["links"])))
-        if not orders or not status:
-            return
+        if not status and re.search(r"delivery (?:estimate|date) update", m["subject"], re.I):
+            status = "Delayed" if re.search(r"\bdelayed\b", m["text"], re.I) else None
         key = next((k for k, p in pkgs.items() if orders & set(p.get("orders", []))), None)
+        # An email without a status (like "Ordered:") can still move a known package's date.
+        if not orders or not (status or key):
+            return
         if not key:
             key = AMAZON_ORDER.search(m["subject"] + " " + m["text"])
             key = key.group() if key else min(orders)
         found = {key: "Amazon"}
         item = re.search(r'"(.+?)(?:\.\.\.|…)?"(?:\s+and\s+(\d+)\s+more)?', m["subject"])
-        label = (item.group(1) + (f" +{item.group(2)}" if item.group(2) else "")) if item else "Amazon"
+        label = (item.group(1) + (f" +{item.group(2)}" if item.group(2) else "")) if item else m.get("item") or "Amazon"
     else:
         found = find_numbers(m["text"], m["links"])
     # An email listing several packages (like USPS Informed Delivery) may give each its
@@ -467,8 +489,10 @@ def apply_message(pkgs, m):
             p["label"], p["label_from_carrier"] = label, False
         # Emails can be read out of order; the newest one with a status wins. Delivered is
         # final, except that a later Amazon "Shipped:" for the same order is another shipment.
-        final = p["status"] == "Delivered" and not (carrier == "Amazon" and AMAZON_ORDER.fullmatch(number))
-        if status and not final and m["date"] >= p["status_at"]:
+        another_shipment = p["status"] == "Delivered" and bool(orders)
+        if status and (p["status"] != "Delivered" or another_shipment) and m["date"] >= p["status_at"]:
+            if another_shipment:  # its own items and date, not the delivered package's
+                p["label"], p["eta"] = label, None
             p["status"], p["status_at"] = status, m["date"]
         if eta and m["date"] >= p.get("eta_at", 0):  # a newer email may move the date
             p["eta"], p["eta_at"] = eta.isoformat(), m["date"]

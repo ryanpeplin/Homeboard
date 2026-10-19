@@ -217,15 +217,14 @@ const PK_MAX = 4;  // rows that fit in the sidebar
 function pkStatus(p) {
   if (p.status === "Delivered")
     return `Delivered ${new Date(p.status_at * 1000).toLocaleDateString(undefined, { weekday: "short" })}`;
-  if (p.status !== "Shipped" || !p.eta) return p.status;
+  if (!["Shipped", "Delayed"].includes(p.status) || !p.eta) return p.status;
   const [y, m, d] = p.eta.split("-").map(Number);
   const eta = new Date(y, m - 1, d), now = new Date();
   const days = Math.round((eta - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / DAY);
   if (days < 0) return p.status;  // the date has passed without a newer email
-  if (days === 0) return "Arrives today";
-  if (days === 1) return "Arrives tomorrow";
-  return "Arrives " + (days < 7 ? eta.toLocaleDateString(undefined, { weekday: "short" })
-    : `${MONTHS[eta.getMonth()]} ${eta.getDate()}`);
+  const when = days === 0 ? "today" : days === 1 ? "tomorrow"
+    : days < 7 ? eta.toLocaleDateString(undefined, { weekday: "short" }) : `${MONTHS[eta.getMonth()]} ${eta.getDate()}`;
+  return p.status === "Delayed" ? `Delayed to ${when}` : `Arrives ${when}`;
 }
 async function loadPackages() {
   try {
