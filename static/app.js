@@ -212,7 +212,7 @@ $("sp-toggle").onclick = () => spotify(playing ? "pause" : "play");
 // ---------- packages ----------
 
 const PK_ICON = { "Out for delivery": "fa-truck-fast", "Delayed": "fa-triangle-exclamation", "Delivered": "fa-circle-check", "Ordered": "fa-receipt" };
-const PK_MAX = 4;  // rows that fit in the sidebar
+const PK_MAX = 10;  // rows that fit in the sidebar
 
 function pkStatus(p) {
   if (p.status === "Delivered")

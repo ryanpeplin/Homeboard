@@ -313,7 +313,7 @@ The **Deliveries** panel in the sidebar lists packages on the way. The server fi
 - **Name:** the store the email came from, such as "Target". If the first email came from the carrier, a later email from the store replaces it.
 
 ### On the board
-- The list is sorted *Out for delivery*, *Delayed*, *Shipped*, *Ordered*, then *Delivered*, and within each by expected date, soonest first. Up to 4 packages show, then "+N more".
+- The list is sorted *Out for delivery*, *Delayed*, *Shipped*, *Ordered*, then *Delivered*, and within each by expected date, soonest first. Up to 10 packages show, then "+N more".
 - On other devices, clicking a package opens its tracking page. The Pi's own screen shows no links, so a tap can't take the kiosk away from the board.
 - The panel is hidden when nothing is on the way. If Gmail can't be read, the panel shows "Not updating" and the reason.
 - The first check reads up to 300 shipping emails from the last `days` days and can take a minute or two on the Pi. Later checks only read new emails.
