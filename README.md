@@ -1,11 +1,11 @@
 # Homeboard
 
-A self-hosted DAKboard-style wall display: a 4-week calendar with daily forecasts, a clock, Fitbit steps, current weather, sunrise and moon phase, and Spotify now-playing controls. It's built for a Raspberry Pi Zero 2 W driving a monitor, and it also works in any browser on your network.
+A self-hosted DAKboard-style wall display: a 4-week calendar with daily forecasts, a clock, Fitbit steps, current weather, sunrise and moon phase, Spotify now-playing controls, and package deliveries found in your Gmail. It's built for a Raspberry Pi Zero 2 W driving a monitor, and it also works in any browser on your network.
 
-- `server.py` is a small Python server. It fetches your calendars, weather, Fitbit and Spotify and serves the page.
+- `server.py` is a small Python server. It fetches your calendars, weather, Fitbit, Spotify and shipping emails and serves the page.
 - `static/` holds the page shown in the browser.
 - `kiosk.sh` starts Chromium fullscreen on the Pi and restarts it if the board stops responding.
-- `config.example.json` is the settings template. Your real settings go in `config.json`, and your Fitbit and Spotify logins in `tokens.json`, which is created automatically when you connect them.
+- `config.example.json` is the settings template. Your real settings go in `config.json`, and your Fitbit and Spotify logins in `tokens.json`, which is created automatically when you connect them. Packages found in your email are kept in `packages.json`, also created automatically.
 
 > `config.json` and `tokens.json` contain your app passwords and private calendar links. They're listed in `.gitignore`, so they never go to GitHub. That also means a fresh copy of the repo doesn't have them, so keep a backup of both somewhere private.
 
@@ -33,6 +33,7 @@ Then edit `config.json`:
 | `calendar.feeds` | One entry per calendar: `name`, a `color`, and its iCal URL (see below). `weeks` is how many rows to show. |
 | `weather` | Your `lat`/`lon` (right-click a spot in Google Maps to copy them). `units` is `fahrenheit` or `celsius`. Weather comes from Open-Meteo, which needs no API key. |
 | `fitbit` / `spotify` | Developer app credentials (see step 3). `fitbit.goal` is your daily step goal for the ring; `0` means 10,000. |
+| `packages` | Your Gmail address and an app password, to show package deliveries (see [Package deliveries](#package-deliveries)). Leave them empty to hide the panel. |
 | `sleep` | When the Pi's screen turns off overnight (see [Sleep schedule](#sleep-schedule)). |
 
 **Where to find iCal URLs**
@@ -269,6 +270,55 @@ The Pi's screen can turn off overnight. This is the `sleep` section of `config.j
 
 **If the board is on a TV:** you can switch the TV itself into standby and back over HDMI-CEC. Install `cec-utils`, then use `echo 'standby 0' | cec-client -s -d 1` to turn it off and `echo 'on 0' | cec-client -s -d 1` to turn it on.
 
+## Package deliveries
+
+The **Deliveries** panel in the sidebar lists packages on the way. The server finds them by reading shipping emails in your Gmail. It doesn't contact the carriers, so each status comes from the subject line of the newest email about that package.
+
+### Set it up
+1. Your Google account needs **2-Step Verification** turned on (Google Account → **Security**).
+2. Go to https://myaccount.google.com/apppasswords, create an app password named `Homeboard`, and copy the 16-letter password.
+3. If your Gmail settings have an IMAP setting (**See all settings → Forwarding and POP/IMAP**), make sure IMAP is enabled.
+4. Fill in the `packages` section of `config.json`, then restart the server:
+   ```json
+   "packages": {
+     "email": "you@gmail.com",
+     "app_password": "abcd efgh ijkl mnop",
+     "days": 14,
+     "keep_delivered_days": 2,
+     "refresh_minutes": 15
+   }
+   ```
+   - `days`: how far back to look for shipping emails. A package is also dropped if it hasn't had an email in that long.
+   - `keep_delivered_days`: how long a delivered package stays on the board.
+   - `refresh_minutes`: how often Gmail is checked.
+
+> An app password gives full access to your mailbox. It's only stored in `config.json`, which never goes to GitHub. The server only reads mail, and never marks anything as read. To revoke access, delete the app password at the link above.
+
+### What it finds
+- **UPS** (`1Z…`), **USPS** (20–22 digits starting with 9x), **FedEx** (12 or 15 digits) and **Amazon Logistics** (`TBA…`) tracking numbers, in the email text or inside "Track package" links.
+  - USPS and FedEx numbers are just digits, so they only count when they come right after a label like "Tracking number:" or appear in a tracking link. That keeps order and phone numbers out.
+- **Amazon orders:** Amazon's own emails rarely include a tracking number, so the panel follows the order number instead. It shows the item name from Amazon's emails (e.g. *Zevo Flying Insect Trap +1*).
+  - **Orders that haven't shipped yet:** an *Ordered:* email adds the order as *Ordered, due Fri*, dimmed, using the latest "Arriving …" date in the email. When it ships, the same row turns into *Shipped*. An order Amazon sends in several shipments stays one row.
+  - Only Amazon orders show before they ship. Other stores' order confirmations use a different order number (or come from a different address) than their shipping emails, so the board couldn't connect the two.
+  - One Amazon package can contain items from several orders, and Amazon's emails don't always list the same order number first. An email is matched to a package if it shares any order number with it.
+  - A later email for an order that was already delivered means another shipment, so the package shows as on the way again, with that shipment's item and date.
+  - *Delivery estimate update* emails count as *Delayed* when they say the package is delayed, and the board shows the new date, e.g. *Delayed to Wed*. When the subject doesn't name the item, the name comes from the email's item list.
+- **Status:** *Ordered* (Amazon only), *Shipped*, *Out for delivery*, *Delayed* or *Delivered*, from the newest email's subject. Subjects like "Your package is here" or "has arrived" also count as delivered. Once a package is delivered it stays delivered.
+- **When no delivered email comes:** some stores never send one, and Amazon sometimes doesn't. A package still *Out for delivery* a day later counts as delivered. A shipped or ordered package is dropped once its expected date is more than `keep_delivered_days` past.
+- **Expected delivery date:** read from wording like "Expected delivery on Tuesday, October 20", "Scheduled Delivery: 10/20/2026", "Arriving tomorrow" or "Estimated delivery: Oct 20 – 23". A shipped package then shows *Arrives today*, *Arrives tomorrow*, *Arrives Tue*, or a date like *Arrives Oct 28* when it's more than a week out.
+  - Dates without a year, weekdays and "tomorrow" count from the day the email was sent. For a range, the later date is used.
+  - A newer email with a different date replaces the old one.
+  - If no date is found, or the date passes without a newer email, the package just shows *Shipped*.
+  - Emails that list several packages (like USPS Informed Delivery) don't set a date, since there's no telling which date belongs to which package.
+- **Name:** the store the email came from, such as "Target". If the first email came from the carrier, a later email from the store replaces it.
+
+### On the board
+- The list is sorted *Out for delivery*, *Delayed*, *Shipped*, *Ordered*, then *Delivered*, and within each by expected date, soonest first. Up to 10 packages show, then "+N more".
+- On other devices, clicking a package opens its tracking page. The Pi's own screen shows no links, so a tap can't take the kiosk away from the board.
+- The panel is hidden when nothing is on the way. If Gmail can't be read, the panel shows "Not updating" and the reason.
+- The first check reads up to 300 shipping emails from the last `days` days and can take a minute or two on the Pi. Later checks only read new emails.
+- Packages whose emails have no tracking number, or a format not listed above, won't show up.
+
 ## Updating the Pi later
 
 Edit files on your PC, then copy the changed file to the Pi from a PowerShell window on the PC. For example, for `config.json`:
@@ -302,6 +352,8 @@ To save changes to GitHub, commit and push from the homeboard folder on your PC 
 | Board shows as a normal window, with tabs and an address bar | Chromium was started while the screen was off. `kiosk.sh` restarts it within a minute of the screen waking. If it doesn't, check `grep '===' ~/chromium-boot.log \| tail` and make sure the Pi has the latest `kiosk.sh` and `server.py`. A reboot during awake hours also fixes it. |
 | Board very slow | Usually memory. Keep the background at the screen's resolution, and keep the Chromium settings from step 4.6. |
 | Server problems | Status: `systemctl status homeboard --no-pager`. Log: `journalctl -u homeboard -n 50 --no-pager`. |
+| Deliveries panel says "Not updating" | The message gives the reason. "Gmail sign-in failed" usually means the app password was revoked or mistyped. Make a new one and restart the server. |
+| A package is missing from Deliveries | Its emails may not include a tracking number, or use a format the board doesn't know (see [What it finds](#what-it-finds)). |
 | Spotify panel says "Spotify not working" | The message under it gives the reason. Usually the login needs redoing on the PC; then copy `tokens.json` to the Pi. |
 | Desktop, taskbar or a Chromium pop-up came back after an update | Run the matching command from step 4.6 again. |
 | Board doesn't load on the PC | Make sure exactly one copy of the server is running (see step 2). |
@@ -336,6 +388,6 @@ Untested. If `ps -e | grep -E 'labwc|wayfire|Xorg'` shows `Xorg` instead of `lab
 
 ## Notes
 - **Pi Zero 2 W (512MB RAM):** use a JPEG background at your screen's resolution (1366×768 for the HannStar HF199H), not a large photo. The original 4.8MB, 2560×1440 background made the board very slow; the current `background-1366.jpg` is 254KB. The page only redraws when data changes. If Chromium is ever sluggish, raise the Spotify polling interval (10 s) on the last lines of `static/app.js`.
-- **Update times:** the clock updates every second, Spotify every 10 seconds, the calendar every 10 minutes, steps about every 5 minutes, and weather every 15 minutes.
+- **Update times:** the clock updates every second, Spotify every 10 seconds, the calendar every 10 minutes, steps about every 5 minutes, and weather and package deliveries every 15 minutes.
 - **Your network:** any device on your network can open the board, including the Spotify play/pause buttons. Only run it on a trusted home network.
 - **Calendar errors:** if a feed fails to load, the rest of the board still loads. The failure is logged in the browser console.
