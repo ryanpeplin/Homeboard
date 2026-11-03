@@ -48,7 +48,7 @@ function tick() {
     shownDay = day;
     $("date").textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
     $("moon").textContent = moonPhase(now);
-    if (!first) { loadCalendar(true); loadWeather(true); }
+    if (!first) { loadCalendar(true); loadWeather(true); delete last.packages; loadPackages(); }  // "tomorrow" is now "today"
   }
 }
 
@@ -209,6 +209,44 @@ async function spotify(action) {
 document.querySelectorAll("#sp-controls [data-act]").forEach((b) => b.onclick = () => spotify(b.dataset.act));
 $("sp-toggle").onclick = () => spotify(playing ? "pause" : "play");
 
+// ---------- packages ----------
+
+const PK_ICON = { "Out for delivery": "fa-truck-fast", "Delayed": "fa-triangle-exclamation", "Delivered": "fa-circle-check", "Ordered": "fa-receipt" };
+const PK_MAX = 10;  // rows that fit in the sidebar
+
+function pkStatus(p) {
+  if (p.status === "Delivered")
+    return `Delivered ${new Date(p.status_at * 1000).toLocaleDateString(undefined, { weekday: "short" })}`;
+  if (!["Shipped", "Delayed", "Ordered"].includes(p.status) || !p.eta) return p.status;
+  const [y, m, d] = p.eta.split("-").map(Number);
+  const eta = new Date(y, m - 1, d), now = new Date();
+  const days = Math.round((eta - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / DAY);
+  if (days < 0) return p.status;  // the date has passed without a newer email
+  const when = days === 0 ? "today" : days === 1 ? "tomorrow"
+    : days < 7 ? eta.toLocaleDateString(undefined, { weekday: "short" }) : `${MONTHS[eta.getMonth()]} ${eta.getDate()}`;
+  return { Delayed: `Delayed to ${when}`, Ordered: `Ordered, due ${when}` }[p.status] || `Arrives ${when}`;
+}
+async function loadPackages() {
+  try {
+    const { data, changed } = await getJSON("packages", "/api/packages");
+    if (data.error) console.warn("packages:", data.error);
+    if (!changed) return;
+    const list = data.packages;
+    $("packages").hidden = !list.length && !data.error;
+    const rows = list.slice(0, PK_MAX).map((p) => {
+      // Links only off the wall display, where a tap would navigate the kiosk away from the board.
+      const row = el(IS_KIOSK ? "div" : "a", "pk" + ({ "Out for delivery": " out", Ordered: " ordered" }[p.status] || ""));
+      if (!IS_KIOSK) { row.href = p.link; row.target = "_blank"; row.rel = "noopener"; }
+      row.append(el("i", `fa-solid ${PK_ICON[p.status] || "fa-box"}`), el("span", "pk-label", p.label),
+        el("span", "pk-status", pkStatus(p)));
+      return row;
+    });
+    if (list.length > PK_MAX) rows.push(el("div", "pk-more", `+${list.length - PK_MAX} more`));
+    if (data.error) rows.push(el("div", "pk-more", `Not updating: ${data.error}`));
+    $("pk-list").replaceChildren(...rows);
+  } catch (e) { console.warn(e); }
+}
+
 // ---------- sleep ----------
 
 // Only the wall display itself (its kiosk opens http://localhost:8080) follows the
@@ -224,7 +262,7 @@ async function loadSleep() {
     if (data.asleep === asleep) return;
     asleep = data.asleep;
     $("sleep").hidden = !asleep;
-    if (!asleep) { loadCalendar(true); loadWeather(true); loadFitbit(); loadSpotify(); }
+    if (!asleep) { loadCalendar(true); loadWeather(true); loadFitbit(); loadSpotify(); loadPackages(); }
   } catch (e) { console.warn(e); }
 }
 // Skip the network-heavy pollers while the screen is dark.
@@ -245,5 +283,6 @@ const whenAwake = (fn) => () => { if (!asleep) fn(); };
   loadWeather();  setInterval(loadWeather, 15 * 60000);
   loadFitbit();   setInterval(whenAwake(loadFitbit), 5 * 60000);
   loadSpotify();  setInterval(whenAwake(loadSpotify), 10000);
+  loadPackages(); setInterval(whenAwake(loadPackages), 5 * 60000);
   loadSleep();    setInterval(loadSleep, 30000);
 })();

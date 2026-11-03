@@ -35,6 +35,14 @@
     "client_secret": ""
   },
 
+  "packages": {
+    "email": "",
+    "app_password": "",
+    "days": 14,
+    "keep_delivered_days": 2,
+    "refresh_minutes": 15
+  },
+
   "sleep": {
     "enabled": false,
     "awake": {

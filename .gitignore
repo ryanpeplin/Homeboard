@@ -2,6 +2,8 @@
 # config.example.json is the committed template.
 config.json
 tokens.json
+# Packages found in Gmail
+packages.json
 
 # Python
 __pycache__/

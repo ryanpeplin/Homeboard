@@ -1,10 +1,16 @@
 """Homeboard: a small self-hosted DAKboard-style wall display server.
 
 Serves static/ and a JSON API that proxies calendars (iCal), weather (Open-Meteo),
-Fitbit steps (via the Google Health API) and Spotify now-playing. Run:  python server.py
+Fitbit steps (via the Google Health API), Spotify now-playing, and package deliveries
+found in Gmail (over IMAP). Run:  python server.py
 """
+import email
+import email.policy
+import email.utils
+import imaplib
 import json
 import mimetypes
+import re
 import secrets
 import ssl
 import subprocess
@@ -15,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -244,6 +251,371 @@ SPOTIFY_ACTIONS = {
 }
 
 
+# ---------- packages (tracking numbers from Gmail) ----------
+
+PACKAGES_FILE = ROOT / "packages.json"
+CARRIER_LINKS = {
+    "UPS": "https://www.ups.com/track?tracknum={}",
+    "USPS": "https://tools.usps.com/go/TrackConfirmAction?tLabels={}",
+    "FedEx": "https://www.fedex.com/fedextrack/?trknbr={}",
+    "Amazon": "https://track.amazon.com/tracking/{}",
+}
+AMAZON_ORDER_LINK = "https://www.amazon.com/gp/your-account/order-details?orderID={}"
+AMAZON_ORDER = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
+CARRIER_DOMAINS = ("ups.com", "fedex.com", "usps.com")
+# These formats can't be mistaken for anything else, so they're taken anywhere in an email.
+DISTINCT = [("UPS", re.compile(r"\b1Z[0-9A-Z]{16}\b", re.I)), ("Amazon", re.compile(r"\bTBA\d{12}\b", re.I))]
+# Bare digit strings also turn up as order and account numbers, so these only count
+# right after a label like "Tracking number:" or inside a tracking link.
+DIGITS = [("USPS", re.compile(r"(?<!\d)9[1-5](?: ?\d){18,20}(?!\d)")), ("FedEx", re.compile(r"(?<!\d)(?:\d{15}|\d{12})(?!\d)"))]
+TRACK_LABEL = re.compile(r"track(?:ing)?\s*(?:number|no\.?|num|#|id|code)?(?:\(s\)|s)?\s*(?:is)?\s*[:#.]?\s*$", re.I)
+TRACK_PARAM = re.compile(
+    r"(?:tracknums?|trknbr|tracknumbers|tlabels|qtc_tlabels1|inquirynumber1|tracking_?numbers?|tracking_?id)=([0-9A-Za-z]{10,34})", re.I)
+# Checked in order against the subject line only. Bodies often carry a whole
+# "Ordered > Shipped > Out for delivery > Delivered" progress bar, so they'd match everything.
+STATUSES = [
+    ("Delayed", re.compile(r"delay|exception|attempted|unable to deliver", re.I)),
+    ("Delivered", re.compile(r"(?<!be )(?<!being )\bdelivered\b|\b(?:is|are) here\b|\b(?:has|have) arrived\b", re.I)),
+    ("Out for delivery", re.compile(r"out for delivery|(?:delivery|delivered|arriving|arrives) today", re.I)),
+    ("Shipped", re.compile(r"shipped|on (?:its|the) way|in transit|shipment|tracking", re.I)),
+]
+STATUS_ORDER = {"Out for delivery": 0, "Delayed": 1, "Shipped": 2, "Ordered": 3, "Delivered": 4}
+# Expected delivery dates are only read right after one of these labels, so order and
+# ship dates elsewhere in the email are ignored.
+ETA_LABEL = re.compile(
+    r"\b(?:(?:expected|estimated|scheduled|new)\s+(?:delivery|arrival)(?:\s+date)?(?:\s+(?:on|by|is))?"
+    r"|arriving|arrives|will\s+arrive|expected\s+by|delivery\s+(?:date|by)|get\s+it|delivers)\b", re.I)
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+WEEKDAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+ETA_DATE = re.compile(
+    r"\b(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?"
+    r"(?:\s*[-–]\s*(?P<day2>\d{1,2})\b)?(?:,?\s+(?P<year>\d{4}))?"
+    r"|\b(?P<nm>\d{1,2})/(?P<nd>\d{1,2})(?:/(?P<ny>\d{2}(?:\d{2})?))?\b"
+    r"|\b(?P<rel>today|tomorrow)\b"
+    r"|\b(?P<wd>mon|tue|wed|thu|fri|sat|sun)(?:day|s|sday|nesday|rs|rsday|urday)?\b\.?", re.I)
+# Bump when packages.json's contents would differ under the current parsing rules;
+# the next run then rebuilds it from the mailbox.
+PACKAGES_VERSION = 4
+_packages = {}
+_packages_error = None
+
+
+class _HTMLText(HTMLParser):
+    """Collect an HTML email's visible text and link targets."""
+
+    BLOCKS = {"p", "div", "td", "tr", "li", "br", "table", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+    def __init__(self):
+        super().__init__()
+        self.parts, self.links, self._skip = [], [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("head", "style", "script"):
+            self._skip += 1
+        elif tag == "a":
+            self.links += [v for k, v in attrs if k == "href" and v]
+        # Keep "Tracking number:" and the number in the next cell apart, and blocks on their own lines.
+        self.parts.append("\n" if tag in self.BLOCKS else " ")
+
+    def handle_endtag(self, tag):
+        if tag in ("head", "style", "script"):
+            self._skip = max(0, self._skip - 1)
+        self.parts.append("\n" if tag in self.BLOCKS else " ")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
+def read_message(raw):
+    msg = email.message_from_bytes(raw, policy=email.policy.default)
+    texts, links = [], []
+    for part in msg.walk():
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html") or part.is_attachment():
+            continue
+        try:
+            body = part.get_content()
+        except Exception:  # unknown charset and the like
+            continue
+        if ctype == "text/html":
+            parser = _HTMLText()
+            parser.feed(body)
+            body, links = "".join(parser.parts), links + parser.links
+        else:
+            links += re.findall(r"https?://\S+", body)
+        texts.append(body)
+    name, addr = email.utils.parseaddr(str(msg.get("From", "")))
+    domain = addr.rpartition("@")[2].lower()
+    try:
+        sent = email.utils.parsedate_to_datetime(str(msg["Date"])).timestamp()
+    except Exception:
+        sent = time.time()
+    return {
+        "subject": re.sub(r"\s+", " ", str(msg.get("Subject", ""))).strip(),
+        "sender": name.strip() or domain.removeprefix("www."),
+        "domain": domain,
+        "date": sent,
+        "text": re.sub(r"\s+", " ", " ".join(texts)),
+        "links": links,
+        "item": item_name("\n".join(texts)),
+    }
+
+
+def item_name(text):
+    """The first item in an order email: the line before "Quantity: 1", minus bullets and a trailing "..."."""
+    # Amazon pads its HTML with lines of non-breaking spaces and zero-width characters.
+    lines = [re.sub(r"[\u00ad\u034f\u200b-\u200f\u202a-\u202e]", "", line).strip().strip("*•-").strip()
+             for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    for i, line in enumerate(lines[1:], 1):
+        if line.lower().startswith("quantity"):
+            name = lines[i - 1]
+            if name.endswith(("...", "…")):  # Amazon cuts names mid-word; drop the partial word
+                name = name.rstrip(".…").rsplit(" ", 1)[0]
+            return name
+    return None
+
+
+def classify(number):
+    """Return (carrier or None, normalized number) for a candidate tracking number."""
+    number = number.replace(" ", "").upper()
+    for carrier, rx in DISTINCT + DIGITS:
+        if rx.fullmatch(number):
+            return carrier, number
+    return None, number
+
+
+def find_numbers(text, links):
+    found = {}
+    for carrier, rx in DISTINCT:
+        for m in rx.finditer(text):
+            found[m.group().upper()] = carrier
+    for carrier, rx in DIGITS:
+        for m in rx.finditer(text):
+            if TRACK_LABEL.search(text[max(0, m.start() - 60):m.start()]):
+                found.setdefault(m.group().replace(" ", ""), carrier)
+    for href in links:
+        # Retailers often wrap the carrier link in a click-tracking redirect, hence the double unquote.
+        for m in TRACK_PARAM.finditer(urllib.parse.unquote(urllib.parse.unquote(href))):
+            carrier, number = classify(m.group(1))
+            if carrier:
+                found.setdefault(number, carrier)
+    return found
+
+
+def find_eta(text, sent, latest=False):
+    """The expected delivery date after the first ETA label that has one, as a date, or None.
+
+    Dates without a year, weekdays, "today" and "tomorrow" are taken relative to the day
+    the email was sent. For a range like "Oct 20 - Oct 23" the later date is used.
+    With latest, the latest date after any label: an order confirmation lists one
+    "Arriving ..." per shipment, and the order is complete after the last.
+    """
+    found = []
+    sent_day = datetime.fromtimestamp(sent).date()
+    for label in ETA_LABEL.finditer(text):
+        dates = []
+        for m in ETA_DATE.finditer(text[label.end():label.end() + 60]):
+            g = m.groupdict()
+            try:
+                if g["mon"]:
+                    month, day, year = MONTHS.index(g["mon"].lower()) + 1, int(g["day2"] or g["day"]), g["year"]
+                elif g["nm"]:
+                    month, day, year = int(g["nm"]), int(g["nd"]), g["ny"]
+                elif g["rel"]:
+                    dates.append(sent_day + timedelta(days=g["rel"].lower() == "tomorrow"))
+                    continue
+                else:
+                    ahead = (WEEKDAY_NAMES.index(g["wd"].lower()) - sent_day.weekday()) % 7
+                    dates.append(sent_day + timedelta(days=ahead))
+                    continue
+                if year:
+                    d = date(int(year) + (2000 if len(year) == 2 else 0), month, day)
+                else:
+                    d = date(sent_day.year, month, day)
+                    if d < sent_day - timedelta(days=60):  # "Jan 3" in a late-December email
+                        d = date(sent_day.year + 1, month, day)
+            except ValueError:  # 13/45 and the like
+                continue
+            dates.append(d)
+        dates = [d for d in dates if sent_day - timedelta(days=1) <= d <= sent_day + timedelta(days=45)]
+        if dates and not latest:
+            return max(dates)
+        found += dates
+    return max(found, default=None)
+
+
+def apply_message(pkgs, m):
+    """Add or update the packages one email mentions."""
+    status = next((s for s, rx in STATUSES if rx.search(m["subject"])), None)
+    label, from_carrier = m["sender"], m["domain"].endswith(CARRIER_DOMAINS)
+    orders = set()
+    if re.search(r"(^|\.)amazon\.", m["domain"]):
+        # Amazon's own emails rarely include a tracking number, so follow the order
+        # instead. Subjects look like 'Shipped: "Item name..." and 1 more item'. "Ordered:" is skipped.
+        # A package can hold items from several orders, and Amazon's emails for it don't
+        # agree on which one is "Order #", so a package matches on any order number it shares.
+        orders = set(AMAZON_ORDER.findall(" ".join([m["subject"], m["text"]] + m["links"])))
+        if not status and re.match(r"ordered\b", m["subject"], re.I):
+            status = "Ordered"  # not shipped yet; later emails for the order update the same row
+        if not status and re.search(r"delivery (?:estimate|date) update", m["subject"], re.I):
+            status = "Delayed" if re.search(r"\bdelayed\b", m["text"], re.I) else None
+        key = next((k for k, p in pkgs.items() if orders & set(p.get("orders", []))), None)
+        # An email without a status (like "Ordered:") can still move a known package's date.
+        if not orders or not (status or key):
+            return
+        if not key:
+            key = AMAZON_ORDER.search(m["subject"] + " " + m["text"])
+            key = key.group() if key else min(orders)
+        found = {key: "Amazon"}
+        item = re.search(r'"(.+?)(?:\.\.\.|…)?"(?:\s+and\s+(\d+)\s+more)?', m["subject"])
+        label = (item.group(1).rstrip(" ,;:-") + (f" +{item.group(2)}" if item.group(2) else "")) if item else m.get("item") or "Amazon"
+    else:
+        found = find_numbers(m["text"], m["links"])
+    # An email listing several packages (like USPS Informed Delivery) may give each its
+    # own date, and there's no telling which date goes with which number.
+    eta = find_eta(m["subject"] + " " + m["text"], m["date"], latest=status == "Ordered") if len(found) == 1 else None
+    for number, carrier in found.items():
+        p = pkgs.get(number)
+        if not p:
+            is_order = AMAZON_ORDER.fullmatch(number)
+            pkgs[number] = {
+                "carrier": carrier, "label": label, "label_from_carrier": from_carrier,
+                "status": status or "Shipped", "status_at": m["date"], "updated": m["date"],
+                "link": (AMAZON_ORDER_LINK if is_order else CARRIER_LINKS[carrier]).format(number),
+                "eta": eta and eta.isoformat(), "eta_at": m["date"],
+            }
+            if orders:
+                pkgs[number]["orders"] = sorted(orders)
+            continue
+        if orders:
+            p["orders"] = sorted(set(p.get("orders", [])) | orders)
+        if p["label_from_carrier"] and not from_carrier:  # "Target" says more than "UPS"
+            p["label"], p["label_from_carrier"] = label, False
+        # Emails can be read out of order; the newest one with a status wins. Delivered is
+        # final, except that a later Amazon "Shipped:" for the same order is another shipment.
+        another_shipment = p["status"] == "Delivered" and bool(orders)
+        if status and (p["status"] != "Delivered" or another_shipment) and m["date"] >= p["status_at"]:
+            if another_shipment:  # its own items and date, not the delivered package's
+                p["label"], p["eta"] = label, None
+            p["status"], p["status_at"] = status, m["date"]
+        if eta and m["date"] >= p.get("eta_at", 0):  # a newer email may move the date
+            p["eta"], p["eta_at"] = eta.isoformat(), m["date"]
+        p["updated"] = max(p["updated"], m["date"])
+
+
+def load_packages():
+    if PACKAGES_FILE.exists():
+        return json.loads(PACKAGES_FILE.read_text(encoding="utf-8"))
+    return {}
+
+
+def all_mail_box(imap):
+    """Gmail's All Mail folder (its name depends on the account's language), so archived mail counts too."""
+    _, boxes = imap.list()
+    for line in boxes:
+        if isinstance(line, bytes) and "\\All" in line.decode().partition(")")[0]:
+            return line.decode().rpartition(' "/" ')[2]
+    return "INBOX"
+
+
+def prune_packages(pkgs, days, keep_delivered_days, now=None):
+    """Drop packages that are done, including ones whose last email never came.
+
+    Not every store sends a delivered email (and Amazon sometimes doesn't), so a package
+    still out for delivery a day later counts as delivered, and a shipped one is dropped
+    once its expected date is more than keep_delivered_days past.
+    """
+    now = now or time.time()
+    keep = keep_delivered_days * 86400
+    today = datetime.fromtimestamp(now).date()
+    kept = {}
+    for k, p in pkgs.items():
+        if p["status"] == "Out for delivery" and now - p["status_at"] > 86400:
+            p["status"] = "Delivered"
+        if now - p["updated"] > days * 86400 or (p["status"] == "Delivered" and now - p["status_at"] > keep):
+            continue
+        if p["status"] != "Delivered" and p.get("eta") and date.fromisoformat(p["eta"]) < today - timedelta(days=keep_delivered_days):
+            continue
+        kept[k] = p
+    return kept
+
+
+def refresh_packages():
+    """Read new shipping emails since the last run and update packages.json."""
+    global _packages
+    cfg = CONFIG["packages"]
+    days = cfg.get("days", 14)
+    state = load_packages()
+    if state.get("version") != PACKAGES_VERSION:
+        state = {}
+    pkgs = state.get("packages", {})
+    imap = imaplib.IMAP4_SSL("imap.gmail.com", ssl_context=SSL, timeout=60)
+    try:
+        try:
+            imap.login(cfg["email"], cfg["app_password"].replace(" ", ""))
+        except imaplib.IMAP4.error as e:
+            raise RuntimeError(f"Gmail sign-in failed, check the email and app password ({e})")
+        typ, _ = imap.select(all_mail_box(imap), readonly=True)  # readonly: never marks mail as read
+        if typ != "OK":
+            raise RuntimeError("couldn't open the mailbox")
+        validity = (imap.response("UIDVALIDITY")[1][0] or b"").decode()
+        last_uid = state.get("last_uid", 0) if state.get("uidvalidity") == validity else 0
+        # Gmail search syntax; {a b} means a OR b. Only messages since the last run are fetched.
+        query = ["X-GM-RAW", f'"newer_than:{days}d {{tracking ordered shipped shipment delivered delivery}}"']
+        if last_uid:
+            query = ["UID", f"{last_uid + 1}:*"] + query
+        _, data = imap.uid("SEARCH", *query)
+        uids = [u for u in map(int, data[0].split()) if u > last_uid][-300:]
+        for i in range(0, len(uids), 25):
+            _, data = imap.uid("FETCH", ",".join(map(str, uids[i:i + 25])), "(BODY.PEEK[])")
+            for item in data:
+                if isinstance(item, tuple):
+                    apply_message(pkgs, read_message(item[1]))
+        last_uid = max(uids + [last_uid])
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    pkgs = prune_packages(pkgs, days, cfg.get("keep_delivered_days", 2))
+    PACKAGES_FILE.write_text(json.dumps(
+        {"version": PACKAGES_VERSION, "uidvalidity": validity, "last_uid": last_uid, "packages": pkgs}, indent=2), encoding="utf-8")
+    _packages = pkgs
+
+
+def packages_enabled():
+    cfg = CONFIG.get("packages") or {}
+    return bool(cfg.get("email") and cfg.get("app_password"))
+
+
+def packages_loop():
+    global _packages, _packages_error
+    _packages = load_packages().get("packages", {})  # show the last known list right after a restart
+    while True:
+        try:
+            refresh_packages()
+            _packages_error = None
+        except Exception as e:
+            _packages_error = str(e)
+            print(f"packages: {e}", flush=True)
+        time.sleep(CONFIG["packages"].get("refresh_minutes", 15) * 60)
+
+
+def packages_view():
+    if not packages_enabled():
+        return {"enabled": False, "packages": []}
+    # Within a status, soonest expected delivery first; packages without a date after those.
+    items = sorted(_packages.values(), key=lambda p: (
+        STATUS_ORDER.get(p["status"], 2), p.get("eta") or "9999", -p["status_at"]))
+    return {
+        "enabled": True,
+        "error": _packages_error,
+        "packages": [{k: p[k] for k in ("carrier", "label", "status", "status_at", "link")} | {"eta": p.get("eta")} for p in items],
+    }
+
+
 # ---------- sleep schedule ----------
 
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -349,6 +721,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, cached("fitbit", 5 * 60, fetch_fitbit))
             if path == "/api/spotify":
                 return self.send(200, fetch_spotify())
+            if path == "/api/packages":
+                return self.send(200, packages_view())
             if path.startswith("/auth/"):
                 return self.auth(path.split("/")[2], path.endswith("/callback"), params)
             return self.static(path)
@@ -398,4 +772,6 @@ class Server(ThreadingHTTPServer):
 if __name__ == "__main__":
     print(f"Homeboard on http://127.0.0.1:{PORT}  (and on this machine's LAN IP)")
     threading.Thread(target=sleep_loop, daemon=True).start()
+    if packages_enabled():
+        threading.Thread(target=packages_loop, daemon=True).start()
     Server(("0.0.0.0", PORT), Handler).serve_forever()
